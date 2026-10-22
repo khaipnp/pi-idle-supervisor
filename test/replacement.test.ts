@@ -1,5 +1,6 @@
 import { fauxAssistantMessage, fauxText } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { REPLACEMENT_TIMEOUT_MS } from "../src/extension.ts";
 import { assertSchema, clientHeaders, createHost, type Host, openEvents, remoteGet } from "./harness.ts";
 
 let host: Host | undefined;
@@ -41,6 +42,43 @@ describe("session replacement and quit", () => {
 		expect(seqs).toEqual(seqs.map((_, i) => seqs[0] + i)); // strictly +1: no gaps, no double emission
 		const replacedAt = stream.events.findIndex((e) => e.event === "session_replaced");
 		expect(stream.events.slice(replacedAt).filter((e) => e.event === "message_end")).toHaveLength(2); // user + assistant, once each
+		stream.close();
+	});
+
+	test.each(["fork", "reload"] as const)("%s keeps the token working and publishes session_replaced", async (how) => {
+		host = await createHost();
+		host.faux.setResponses([fauxAssistantMessage(fauxText("old"))]);
+		const { url, token } = await host.startRemote();
+		const stream = await openEvents(url, token);
+		await host.type("hello");
+		await stream.waitForType("settled");
+		const userEntry = host.session.sessionManager.getBranch().find((e) => e.type === "message" && e.message.role === "user")!.id;
+
+		if (how === "fork") await host.runtime.fork(userEntry);
+		else await host.session.reload();
+		const replaced = await stream.waitForType("session_replaced");
+		assertSchema("Event", replaced.data);
+		const after = await snapshotOf(url, token);
+		assertSchema("Snapshot", after);
+		expect(after.hostSession.id).toBe(host.session.sessionManager.getSessionId());
+		stream.close();
+	});
+
+	test("a replacement that never completes turns remote off instead of staying busy forever", async () => {
+		host = await createHost();
+		const { url, token } = await host.startRemote();
+		const stream = await openEvents(url, token);
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			// Shut the runtime down for a non-quit reason without a successor.
+			await host.session.extensionRunner.emit({ type: "session_shutdown", reason: "new" });
+			expect((await remoteGet(url, "/v1/snapshot", clientHeaders(token))).status).toBe(503);
+			await vi.advanceTimersByTimeAsync(REPLACEMENT_TIMEOUT_MS + 1);
+		} finally {
+			vi.useRealTimers();
+		}
+		await stream.waitForType("remote_off");
+		await expect(remoteGet(url, "/v1/snapshot", clientHeaders(token))).rejects.toThrow();
 		stream.close();
 	});
 

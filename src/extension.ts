@@ -6,6 +6,8 @@ import { RemoteServer } from "./server.ts";
 import { hostSessionOf, nextMessageId, toMessage, toSnapshot, toolUpdateText } from "./snapshot.ts";
 
 const DEFAULT_PORT = 7878;
+/** How long the server waits for a replacement session before giving up and turning remote off. */
+export const REPLACEMENT_TIMEOUT_MS = 30_000;
 
 interface RemoteSettings {
 	port?: number;
@@ -23,6 +25,7 @@ interface Shared {
 	stopping?: Promise<void>;
 	/** Where clients reach the server (tunnel URL); the server itself only knows 127.0.0.1. */
 	publicUrl?: string;
+	replacementTimer?: ReturnType<typeof setTimeout>;
 }
 const SHARED_KEY = Symbol.for("pi-idle-supervisor.remote");
 function shared(): Shared {
@@ -57,6 +60,7 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 			c.ui.notify("Remote dialogs are unavailable: this Pi version's UI context is not what pi-idle-supervisor expects.", "warning");
 		}
 		// A previous runtime left the server running (/new, /resume, /fork, reload): take it over.
+		clearTimeout(state.replacementTimer);
 		if (state.server) {
 			state.server.rebind({ snapshot, prompt, abort: () => ctx?.abort(), onClients: refreshFooter });
 			refreshFooter();
@@ -106,13 +110,19 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 		if (event.reason === "quit") return stopRemote();
 		// Replacement: dialogs belong to the old UI, so dismiss them; the next runtime adopts the server.
 		state.dialogs?.dispose();
-		state.server?.detach();
+		if (!state.server) return;
+		state.server.detach();
+		// If no session_start follows (a failed /resume, say), clients must not wait on 503 forever.
+		clearTimeout(state.replacementTimer);
+		state.replacementTimer = setTimeout(() => void stopRemote(), REPLACEMENT_TIMEOUT_MS);
+		state.replacementTimer.unref();
 	});
 
 	/** Idempotent and awaitable: a second caller waits for the stop already in progress. */
 	function stopRemote(): Promise<void> {
 		const { server, dialogs } = state;
 		if (!server) return state.stopping ?? Promise.resolve();
+		clearTimeout(state.replacementTimer);
 		state.server = state.dialogs = state.publicUrl = undefined;
 		refreshFooter();
 		dialogs?.dispose();

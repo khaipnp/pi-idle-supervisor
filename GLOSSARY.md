@@ -1,0 +1,61 @@
+# Pi Remote Control
+
+Lets a person watch and steer a Pi session that is running in a terminal from a remote client, such as a phone, while away from the keyboard.
+
+## Language
+
+### Parties
+
+**Host session**:
+The Pi session running in a terminal that remote clients attach to and control.
+_Avoid_: server, backend, instance
+
+**Remote client**:
+An app on another device, paired with a host session, that shows it and sends it commands.
+_Avoid_: phone, mobile, device
+
+### Access
+
+**Remote on / Remote off**:
+Whether the host session is currently accepting remote clients; only the person at the terminal turns it on or off.
+_Avoid_: enabled, listening, sharing
+
+**Pairing**:
+A remote client learning a host session's address and access token by scanning the code shown in the terminal.
+_Avoid_: login, registration, linking
+
+**Access token**:
+The secret created each time remote is turned on, which a remote client must present; it dies when remote turns off or the host session ends.
+_Avoid_: password, API key, pairing code
+
+### Conversation
+
+**Prompt**:
+A message from a person to the agent, typed in the terminal or sent by a remote client.
+_Avoid_: input, command, ui prompt
+
+**Steer**:
+A prompt sent while the agent is working, delivered after its current turn.
+_Avoid_: interrupt
+
+**Follow-up**:
+A prompt sent while the agent is working, delivered after the whole run finishes.
+_Avoid_: queued prompt
+
+**Dialog**:
+A question that Pi or an extension blocks on until a person answers it (confirm, select, or input). It is offered to the terminal and every remote client at once, and the first answer wins.
+_Avoid_: approval, prompt, ui prompt
+
+**Settled**:
+The host session has finished all automatic work and is waiting for a person.
+_Avoid_: done, idle, finished
+
+### Sync
+
+**Snapshot**:
+The whole current conversation of the host session, as a remote client receives it on connecting.
+_Avoid_: history, dump, transcript
+
+**Event stream**:
+The ordered live feed of changes in the host session sent to remote clients, which lets a reconnecting client catch up on what it missed.
+_Avoid_: socket, feed, log

@@ -3,8 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	type AgentSession,
-	createAgentSession,
-	DefaultResourceLoader,
+	type AgentSessionRuntime,
+	type CreateAgentSessionRuntimeFactory,
+	createAgentSessionFromServices,
+	createAgentSessionRuntime,
+	createAgentSessionServices,
 	type ExtensionUIContext,
 	ModelRuntime,
 	SessionManager,
@@ -40,9 +43,10 @@ export interface TerminalDialog {
 }
 
 export interface Host {
+	runtime: AgentSessionRuntime;
 	/** Dialogs the extension host (or the wrapper) opened on the terminal, oldest first. */
 	terminalDialogs: TerminalDialog[];
-	session: AgentSession;
+	readonly session: AgentSession;
 	faux: FauxProviderHandle;
 	/** Everything the extension showed with ctx.ui.notify, oldest first. */
 	notifications: Notification[];
@@ -54,6 +58,8 @@ export interface Host {
 }
 
 export async function createHost(options: { tools?: ToolDefinition[] } = {}): Promise<Host> {
+	// Remote state is process-global (ADR-0003); start every host from a clean slate.
+	delete (globalThis as { [key: symbol]: unknown })[Symbol.for("pi-idle-supervisor.remote")];
 	const cwd = mkdtempSync(join(tmpdir(), "pi-remote-test-"));
 	const agentDir = join(cwd, "agent");
 	const faux = fauxProvider({ models: [{ id: "faux-1", input: ["text", "image"] }] });
@@ -63,28 +69,35 @@ export async function createHost(options: { tools?: ToolDefinition[] } = {}): Pr
 		refreshOnCreate: false,
 	});
 	modelRuntime.registerNativeProvider(faux.provider);
-	const resourceLoader = new DefaultResourceLoader({
-		cwd,
-		agentDir,
-		noExtensions: true,
-		noSkills: true,
-		noPromptTemplates: true,
-		noThemes: true,
-		noContextFiles: true,
-		extensionFactories: [extension],
-	});
-	await resourceLoader.reload();
-	const { session } = await createAgentSession({
-		cwd,
-		agentDir,
-		modelRuntime,
-		model: faux.getModel(),
-		resourceLoader,
-		sessionManager: SessionManager.inMemory(cwd),
-		settingsManager: SettingsManager.inMemory({ remote: { port: 0 } } as object),
-		noTools: "builtin",
-		customTools: options.tools,
-	});
+	const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
+		const services = await createAgentSessionServices({
+			cwd,
+			agentDir,
+			modelRuntime,
+			settingsManager: SettingsManager.inMemory({ remote: { port: 0 } } as object),
+			resourceLoaderOptions: {
+				noExtensions: true,
+				noSkills: true,
+				noPromptTemplates: true,
+				noThemes: true,
+				noContextFiles: true,
+				extensionFactories: [extension],
+			},
+		});
+		return {
+			...(await createAgentSessionFromServices({
+				services,
+				sessionManager,
+				sessionStartEvent,
+				model: faux.getModel(),
+				noTools: "builtin",
+				customTools: options.tools,
+			})),
+			services,
+			diagnostics: services.diagnostics,
+		};
+	};
+	const runtime = await createAgentSessionRuntime(createRuntime, { cwd, agentDir, sessionManager: SessionManager.inMemory(cwd) });
 
 	const notifications: Notification[] = [];
 	const terminalDialogs: TerminalDialog[] = [];
@@ -103,14 +116,20 @@ export async function createHost(options: { tools?: ToolDefinition[] } = {}): Pr
 		notify: (message, type) => notifications.push({ message, type }),
 		setStatus: () => {},
 	};
-	await session.bindExtensions({ uiContext: terminal as ExtensionUIContext });
+	// SAFETY: the fake terminal implements the parts of the UI context the extension uses.
+	const bind = (session: AgentSession) => session.bindExtensions({ uiContext: terminal as ExtensionUIContext });
+	runtime.setRebindSession(bind);
+	await bind(runtime.session);
 
 	const host: Host = {
-		session,
+		get session() {
+			return runtime.session;
+		},
+		runtime,
 		faux,
 		notifications,
 		terminalDialogs,
-		type: (line) => session.prompt(line),
+		type: (line) => runtime.session.prompt(line),
 		async startRemote() {
 			const before = notifications.length;
 			await host.type("/remote start");
@@ -123,8 +142,7 @@ export async function createHost(options: { tools?: ToolDefinition[] } = {}): Pr
 			return { url: params.get("url")!, token: params.get("token")! };
 		},
 		async dispose() {
-			await host.type("/remote stop");
-			session.dispose();
+			await runtime.dispose(); // session_shutdown(quit) turns remote off
 		},
 	};
 	return host;

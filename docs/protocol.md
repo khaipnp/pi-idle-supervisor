@@ -79,6 +79,7 @@ data: {"seq":1043, ...}
 
 ```
 
+- While the host session is being replaced (`/new`, `/resume`, `/fork`, reload), every request except `GET /v1/events` gets `503 busy`; retry after `session_replaced`.
 - `seq` increases by one with each event and is never reused for as long as the server is running, including across session replacement.
 - A client resumes by sending `Last-Event-ID: <last seq it saw>`, or `?after=<seq>` when it cannot set headers. The server replays everything after that point, then continues live.
 - The server keeps the last 5000 events. If the requested seq is older than that or newer than the server has ever sent, the server sends a single `resync` event, and the client must fetch a new snapshot. The `resync` event has no SSE `id`, so a reconnecting client keeps its old `Last-Event-ID`.

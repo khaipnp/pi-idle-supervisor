@@ -31,13 +31,17 @@ export interface Snapshot {
 	dialogs: Dialog[];
 }
 
+export function hostSessionOf(sm: ExtensionContext["sessionManager"]): Snapshot["hostSession"] {
+	const name = sm.getSessionName();
+	return { id: sm.getSessionId(), cwd: sm.getCwd(), ...(name ? { name } : {}) };
+}
+
 /** Body of GET /v1/snapshot; `seq` is the last event the state reflects. `dialogs` are those still waiting for an answer. */
 export function toSnapshot(sm: ExtensionContext["sessionManager"], status: Snapshot["status"], seq: number, dialogs: Dialog[]): Snapshot {
-	const name = sm.getSessionName();
 	return {
 		protocolVersion: PROTOCOL_VERSION,
 		seq,
-		hostSession: { id: sm.getSessionId(), cwd: sm.getCwd(), ...(name ? { name } : {}) },
+		hostSession: hostSessionOf(sm),
 		status,
 		messages: toMessages(sm.getBranch()),
 		dialogs,

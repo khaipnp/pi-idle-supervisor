@@ -42,11 +42,24 @@ export class RemoteServer {
 	private readonly events = new EventBuffer();
 	private failures: number[] = [];
 	private lockedUntil = 0;
+	private detached = false;
+	private readonly streams = new Set<ServerResponse>();
 
 	private constructor(
 		private readonly server: Server,
-		private readonly options: RemoteServerOptions,
+		private options: RemoteServerOptions,
 	) {}
+
+	/** Points the server at a new host session's runtime (ADR-0003); token, port and event log are kept. */
+	rebind(host: Pick<RemoteServerOptions, "snapshot" | "prompt" | "abort">): void {
+		this.options = { ...this.options, ...host };
+		this.detached = false;
+	}
+
+	/** The host session is going away: until the next `rebind`, requests that need it get 503 busy. */
+	detach(): void {
+		this.detached = true;
+	}
 
 	/** Binds 127.0.0.1:<port>. Rejects (e.g. EADDRINUSE) instead of falling back to another port. */
 	static async start(options: RemoteServerOptions): Promise<RemoteServer> {
@@ -79,6 +92,17 @@ export class RemoteServer {
 	/** Closes the server and every open connection; the token stops working immediately. */
 	async stop(): Promise<void> {
 		const closed = new Promise<void>((resolve) => this.server.close(() => resolve()));
+		// End event streams gracefully so a last event (remote_off) is flushed before sockets are cut.
+		// A stream whose client is gone never calls back, so also settle on close and cap the wait.
+		const ended = [...this.streams].map(
+			(res) =>
+				new Promise<void>((resolve) => {
+					if (res.destroyed) return resolve();
+					res.once("close", () => resolve());
+					res.end(() => resolve());
+				}),
+		);
+		await Promise.race([Promise.all(ended), new Promise((resolve) => setTimeout(resolve, 1000).unref())]);
 		this.server.closeAllConnections();
 		await closed;
 	}
@@ -101,6 +125,10 @@ export class RemoteServer {
 		}
 
 		const path = new URL(req.url ?? "/", "http://localhost").pathname;
+		if (this.detached && path !== "/v1/events") {
+			// Between a session shutting down and the next one starting there is no host session to serve.
+			return sendError(res, 503, "busy", "The host session is being replaced; retry shortly");
+		}
 		if (req.method === "GET" && path === "/v1/snapshot") {
 			return sendJson(res, 200, this.options.snapshot(this.events.lastSeq));
 		}
@@ -180,9 +208,11 @@ export class RemoteServer {
 			return void res.end();
 		}
 		for (const event of missed) write(event);
+		this.streams.add(res);
 		const unsubscribe = this.events.subscribe(write);
 		const ping = setInterval(() => res.write(": ping\n\n"), PING_INTERVAL_MS);
 		res.on("close", () => {
+			this.streams.delete(res);
 			unsubscribe();
 			clearInterval(ping);
 		});

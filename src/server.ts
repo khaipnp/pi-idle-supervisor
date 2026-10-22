@@ -11,6 +11,7 @@ const MAX_FAILURES = 10;
 const FAILURE_WINDOW_MS = 60_000;
 const LOCKOUT_MS = 60_000;
 const PING_INTERVAL_MS = 15_000;
+const MAX_BODY_BYTES = 1_000_000;
 
 type ErrorCode =
 	| "unauthorized"
@@ -25,6 +26,10 @@ export interface RemoteServerOptions {
 	port: number;
 	/** Builds the body of GET /v1/snapshot for an authorised request; `seq` is the last event so far. */
 	snapshot: (seq: number) => Snapshot;
+	/** Sends a prompt. Returns false when the host session is working and `deliverAs` is missing. */
+	prompt: (text: string, deliverAs: "steer" | "followUp" | undefined) => boolean;
+	/** Stops the current run; no-op when settled. */
+	abort: () => void;
 }
 
 /** HTTP server on 127.0.0.1 that owns the access token, auth checks, lockout and routing. */
@@ -97,7 +102,32 @@ export class RemoteServer {
 			return sendJson(res, 200, this.options.snapshot(this.events.lastSeq));
 		}
 		if (req.method === "GET" && path === "/v1/events") return this.stream(req, res);
+		if (req.method === "POST" && path === "/v1/prompt") {
+			return void this.handlePrompt(req, res).catch(() => sendFailure(res));
+		}
+		if (req.method === "POST" && path === "/v1/abort") {
+			try {
+				this.options.abort();
+			} catch {
+				return sendFailure(res);
+			}
+			return sendJson(res, 202, {});
+		}
 		sendError(res, 404, "not_found", `No route for ${req.method} ${path}`);
+	}
+
+	private async handlePrompt(req: IncomingMessage, res: ServerResponse): Promise<void> {
+		const body = await readJson(req);
+		// SAFETY: body is arbitrary client JSON; every field is validated below before use.
+		const { text, deliverAs } = (typeof body === "object" && body !== null ? body : {}) as { text?: unknown; deliverAs?: unknown };
+		const validDeliverAs = deliverAs === undefined || deliverAs === "steer" || deliverAs === "followUp";
+		if (typeof text !== "string" || text === "" || !validDeliverAs) {
+			return sendError(res, 400, "bad_request", 'Body must be {"text": non-empty string, "deliverAs"?: "steer" | "followUp"}');
+		}
+		if (!this.options.prompt(text, deliverAs)) {
+			return sendError(res, 409, "busy", "The host session is working; set deliverAs to steer or followUp");
+		}
+		sendJson(res, 202, {});
 	}
 
 	/** SSE stream: replays events after the resume point, then continues live. */
@@ -147,6 +177,24 @@ export class RemoteServer {
 	}
 }
 
+/** Reads a JSON request body (max 1 MB). Returns undefined when it is too large or not valid JSON. */
+async function readJson(req: IncomingMessage): Promise<unknown> {
+	const chunks: Buffer[] = [];
+	let size = 0;
+	// SAFETY: a request without setEncoding() yields Buffer chunks.
+	for await (const chunk of req as AsyncIterable<Buffer>) {
+		size += chunk.length;
+		// Keep draining instead of returning, so the client gets its 400 rather than a reset connection.
+		if (size <= MAX_BODY_BYTES) chunks.push(chunk);
+	}
+	if (size > MAX_BODY_BYTES) return undefined;
+	try {
+		return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+	} catch {
+		return undefined;
+	}
+}
+
 function sha256(text: string): Buffer {
 	return createHash("sha256").update(text).digest();
 }
@@ -154,6 +202,12 @@ function sha256(text: string): Buffer {
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
 	res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
 	res.end(JSON.stringify(body));
+}
+
+function sendFailure(res: ServerResponse): void {
+	if (res.headersSent) return void res.destroy();
+	res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+	res.end(JSON.stringify({ error: { code: "bad_request", message: "Request could not be processed" } }));
 }
 
 function sendError(

@@ -97,6 +97,7 @@ Sends a prompt.
 - `deliverAs` is optional and is either `"steer"` or `"followUp"`.
 - If the host session is settled, the prompt starts a run, and the server ignores `deliverAs`.
 - If the host session is working and `deliverAs` is missing, the server responds `409 busy`.
+- A body that is not JSON, is over 1 MB, has empty or non-string `text`, or has another `deliverAs` gets `400 bad_request`.
 - On success the server responds `202 {}`. The prompt then appears in the event stream like any other message.
 
 ### `POST /v1/abort`

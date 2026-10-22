@@ -202,3 +202,9 @@ export async function openEvents(
 		close: () => controller.abort(),
 	};
 }
+
+/** A remote client POST with the documented headers. `body` is sent as JSON unless it is a string (sent raw). */
+export function remotePost(url: string, path: string, token: string, body?: unknown): Promise<Response> {
+	const raw = typeof body === "string" ? body : JSON.stringify(body ?? {});
+	return fetch(url + path, { method: "POST", headers: { ...clientHeaders(token), "Content-Type": "application/json" }, body: raw });
+}

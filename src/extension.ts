@@ -62,6 +62,14 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 
 	const snapshot = (seq: number) => toSnapshot(ctx!.sessionManager, working ? "working" : "settled", seq);
 
+	const prompt = (text: string, deliverAs: "steer" | "followUp" | undefined) => {
+		// Same state as the snapshot: settled starts a run and ignores deliverAs.
+		if (!working) pi.sendUserMessage(text);
+		else if (deliverAs) pi.sendUserMessage(text, { deliverAs });
+		else return false;
+		return true;
+	};
+
 	pi.registerCommand("remote", {
 		description: "Remote control: /remote start | stop | status",
 		getArgumentCompletions: (prefix) =>
@@ -74,7 +82,7 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 				const settings = (pi.getSettings() as { remote?: RemoteSettings }).remote ?? {};
 				const port = settings.port ?? DEFAULT_PORT;
 				try {
-					server = await RemoteServer.start({ port, snapshot });
+					server = await RemoteServer.start({ port, snapshot, prompt, abort: () => ctx?.abort() });
 				} catch (error) {
 					return c.ui.notify(`Remote could not start on 127.0.0.1:${port}: ${(error as Error).message}`, "error");
 				}

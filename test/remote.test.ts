@@ -1,7 +1,7 @@
 import { fauxAssistantMessage, fauxText, fauxThinking, fauxToolCall, Type } from "@earendil-works/pi-ai";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { assertSchema, clientHeaders, createHost, type Host, openEvents, remoteGet } from "./harness.ts";
+import { assertSchema, clientHeaders, createHost, type Host, openEvents, remoteGet, remotePost } from "./harness.ts";
 
 async function expectError(res: Response, status: number, code: string): Promise<Record<string, unknown>> {
 	expect(res.status).toBe(status);
@@ -329,3 +329,114 @@ describe("event stream", () => {
 		}
 	});
 });
+
+describe("prompt and abort", () => {
+	/** A tool that runs until the test releases it or the run is aborted. */
+	function gatedTool() {
+		let release: () => void = () => {};
+		const tool: ToolDefinition = {
+			name: "gate",
+			label: "Gate",
+			description: "Blocks until released",
+			parameters: Type.Object({}),
+			execute: (_id, _params, signal) =>
+				new Promise((resolve) => {
+					const done = () => resolve({ content: [{ type: "text", text: "released" }], details: {} });
+					release = done;
+					signal?.addEventListener("abort", done);
+				}),
+		};
+		return { tool, release: () => release() };
+	}
+	const callGate = () => fauxAssistantMessage(fauxToolCall("gate", {}, { id: "g" }), { stopReason: "toolUse" });
+	const userTexts = (snapshot: { messages: Array<{ role: string; content: Array<{ text?: string }> }> }) =>
+		snapshot.messages.filter((m) => m.role === "user").map((m) => m.content[0].text);
+	const snapshotOf = async (url: string, token: string) => (await remoteGet(url, "/v1/snapshot", clientHeaders(token))).json();
+
+	test("a prompt while settled starts a run, ignores deliverAs, and shows up as a normal user message", async () => {
+		host = await createHost();
+		host.faux.setResponses([fauxAssistantMessage(fauxText("ok"))]);
+		const { url, token } = await host.startRemote();
+		const stream = await openEvents(url, token);
+
+		const res = await remotePost(url, "/v1/prompt", token, { text: "hello from phone", deliverAs: "steer" });
+		expect(res.status).toBe(202);
+		expect(await res.json()).toEqual({});
+		await stream.waitForType("settled");
+
+		const user = stream.events.find((e) => e.event === "message_start")!.data.message as { role: string; content: unknown };
+		expect(user).toMatchObject({ role: "user", content: [{ type: "text", text: "hello from phone" }] });
+		expect(userTexts(await snapshotOf(url, token))).toEqual(["hello from phone"]);
+		// The terminal transcript is the session itself.
+		expect(host.session.messages.some((m) => m.role === "user")).toBe(true);
+		stream.close();
+	});
+
+	test("while working: no deliverAs gets 409 busy", async () => {
+		const gate = gatedTool();
+		host = await createHost({ tools: [gate.tool] });
+		host.faux.setResponses([callGate(), fauxAssistantMessage(fauxText("done"))]);
+		const { url, token } = await host.startRemote();
+		const stream = await openEvents(url, token);
+
+		await remotePost(url, "/v1/prompt", token, { text: "start" });
+		await stream.waitForType("tool_start");
+		await expectError(await remotePost(url, "/v1/prompt", token, { text: "too early" }), 409, "busy");
+
+		gate.release();
+		await stream.waitForType("settled");
+		expect(userTexts(await snapshotOf(url, token))).toEqual(["start"]);
+		stream.close();
+	});
+
+	test("while working: steer is delivered within the run, followUp after it", async () => {
+		const gate = gatedTool();
+		host = await createHost({ tools: [gate.tool] });
+		host.faux.setResponses([callGate(), fauxAssistantMessage(fauxText("saw steer")), fauxAssistantMessage(fauxText("saw follow-up"))]);
+		const { url, token } = await host.startRemote();
+		const stream = await openEvents(url, token);
+
+		await remotePost(url, "/v1/prompt", token, { text: "start" });
+		await stream.waitForType("tool_start");
+		expect((await remotePost(url, "/v1/prompt", token, { text: "steer me", deliverAs: "steer" })).status).toBe(202);
+		expect((await remotePost(url, "/v1/prompt", token, { text: "then this", deliverAs: "followUp" })).status).toBe(202);
+		gate.release();
+		await vi.waitFor(async () => expect(userTexts(await snapshotOf(url, token))).toEqual(["start", "steer me", "then this"]));
+		await vi.waitFor(() => expect(stream.events.filter((e) => e.event === "settled")).toHaveLength(1));
+
+		const roles = (await snapshotOf(url, token)).messages.map((m: { role: string }) => m.role);
+		expect(roles).toEqual(["user", "assistant", "toolResult", "user", "assistant", "user", "assistant"]);
+		stream.close();
+	});
+
+	test("an empty or invalid body gets 400 bad_request", async () => {
+		host = await createHost();
+		const { url, token } = await host.startRemote();
+		const bodies: unknown[] = [{}, { text: "" }, { text: 5 }, { text: "x", deliverAs: "now" }, "not json", "null", "[]", { text: "x".repeat(1_100_000) }];
+		for (const body of bodies) {
+			await expectError(await remotePost(url, "/v1/prompt", token, body), 400, "bad_request");
+		}
+		expect(host.session.messages).toHaveLength(0);
+	});
+
+	test("abort stops a working run; when settled it is a no-op; both return 202", async () => {
+		const gate = gatedTool();
+		host = await createHost({ tools: [gate.tool] });
+		host.faux.setResponses([callGate(), fauxAssistantMessage(fauxText("never"))]);
+		const { url, token } = await host.startRemote();
+		const stream = await openEvents(url, token);
+
+		const idle = await remotePost(url, "/v1/abort", token);
+		expect(idle.status).toBe(202);
+		expect(await idle.json()).toEqual({});
+		expect(stream.events).toHaveLength(0);
+
+		await remotePost(url, "/v1/prompt", token, { text: "start" });
+		await stream.waitForType("tool_start");
+		expect((await remotePost(url, "/v1/abort", token)).status).toBe(202);
+		await stream.waitForType("settled");
+		expect((await snapshotOf(url, token)).status).toBe("settled");
+		stream.close();
+	});
+});
+

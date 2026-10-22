@@ -1,0 +1,187 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/khaipnp/pi-idle-supervisor/schema/protocol.schema.json",
+  "title": "pi-idle-supervisor remote control protocol 1.0",
+  "description": "Bodies and events described in docs/protocol.md. Clients must ignore unknown fields and unknown event types.",
+  "$defs": {
+    "Error": {
+      "type": "object",
+      "required": ["error"],
+      "properties": {
+        "error": {
+          "type": "object",
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "enum": ["unauthorized", "rate_limited", "protocol_mismatch", "bad_request", "busy", "dialog_closed", "not_found"] },
+            "message": { "type": "string" },
+            "serverVersion": { "type": "string" }
+          }
+        }
+      }
+    },
+    "HostSession": {
+      "type": "object",
+      "required": ["id", "cwd"],
+      "properties": {
+        "id": { "type": "string" },
+        "cwd": { "type": "string" },
+        "name": { "type": "string" }
+      }
+    },
+    "Status": { "enum": ["working", "settled"] },
+    "Truncation": {
+      "properties": {
+        "truncated": { "const": true },
+        "originalBytes": { "type": "integer", "minimum": 0 }
+      },
+      "dependentRequired": { "truncated": ["originalBytes"] }
+    },
+    "Block": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["type", "text"],
+          "properties": { "type": { "const": "text" }, "text": { "type": "string" } },
+          "allOf": [{ "$ref": "#/$defs/Truncation" }]
+        },
+        {
+          "type": "object",
+          "required": ["type", "text"],
+          "properties": { "type": { "const": "thinking" }, "text": { "type": "string" } }
+        },
+        {
+          "type": "object",
+          "required": ["type", "id", "name", "arguments"],
+          "properties": {
+            "type": { "const": "toolCall" },
+            "id": { "type": "string" },
+            "name": { "type": "string" },
+            "arguments": {}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "mimeType"],
+          "properties": { "type": { "const": "image" }, "mimeType": { "type": "string" } }
+        }
+      ]
+    },
+    "Message": {
+      "type": "object",
+      "required": ["id", "role", "timestamp", "content"],
+      "properties": {
+        "id": { "type": "string" },
+        "role": { "enum": ["user", "assistant", "toolResult"] },
+        "timestamp": { "type": "integer" },
+        "content": { "type": "array", "items": { "$ref": "#/$defs/Block" } },
+        "toolCallId": { "type": "string" },
+        "toolName": { "type": "string" },
+        "isError": { "type": "boolean" }
+      },
+      "if": { "properties": { "role": { "const": "toolResult" } } },
+      "then": { "required": ["toolCallId", "toolName", "isError"] }
+    },
+    "Dialog": {
+      "type": "object",
+      "required": ["id", "kind", "title"],
+      "properties": {
+        "id": { "type": "string" },
+        "kind": { "enum": ["confirm", "select", "input"] },
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "options": { "type": "array", "items": { "type": "string" } },
+        "placeholder": { "type": "string" },
+        "expiresAt": { "type": "integer" }
+      },
+      "allOf": [
+        { "if": { "properties": { "kind": { "const": "confirm" } } }, "then": { "required": ["message"] } },
+        { "if": { "properties": { "kind": { "const": "select" } } }, "then": { "required": ["options"] } }
+      ]
+    },
+    "Snapshot": {
+      "type": "object",
+      "required": ["protocolVersion", "seq", "hostSession", "status", "messages", "dialogs"],
+      "properties": {
+        "protocolVersion": { "type": "string", "pattern": "^1\\.[0-9]+$" },
+        "seq": { "type": "integer", "minimum": 0 },
+        "hostSession": { "$ref": "#/$defs/HostSession" },
+        "status": { "$ref": "#/$defs/Status" },
+        "messages": { "type": "array", "items": { "$ref": "#/$defs/Message" } },
+        "dialogs": { "type": "array", "items": { "$ref": "#/$defs/Dialog" } }
+      }
+    },
+    "PromptRequest": {
+      "type": "object",
+      "required": ["text"],
+      "properties": {
+        "text": { "type": "string", "minLength": 1 },
+        "deliverAs": { "enum": ["steer", "followUp"] }
+      }
+    },
+    "DialogAnswerRequest": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["value"],
+          "properties": { "value": { "type": ["boolean", "string"] } }
+        },
+        {
+          "type": "object",
+          "required": ["cancelled"],
+          "properties": { "cancelled": { "const": true } }
+        }
+      ]
+    },
+    "Event": {
+      "type": "object",
+      "required": ["seq", "type"],
+      "properties": { "seq": { "type": "integer", "minimum": 1 } },
+      "oneOf": [
+        { "properties": { "type": { "const": "status" }, "status": { "const": "working" } }, "required": ["status"] },
+        { "properties": { "type": { "const": "settled" } } },
+        { "properties": { "type": { "const": "message_start" }, "message": { "$ref": "#/$defs/Message" } }, "required": ["message"] },
+        {
+          "properties": {
+            "type": { "const": "message_delta" },
+            "messageId": { "type": "string" },
+            "blockIndex": { "type": "integer", "minimum": 0 },
+            "kind": { "enum": ["text", "thinking"] },
+            "delta": { "type": "string" }
+          },
+          "required": ["messageId", "blockIndex", "kind", "delta"]
+        },
+        { "properties": { "type": { "const": "message_end" }, "message": { "$ref": "#/$defs/Message" } }, "required": ["message"] },
+        {
+          "properties": {
+            "type": { "const": "tool_start" },
+            "toolCallId": { "type": "string" },
+            "toolName": { "type": "string" },
+            "arguments": {}
+          },
+          "required": ["toolCallId", "toolName", "arguments"]
+        },
+        {
+          "properties": { "type": { "const": "tool_update" }, "toolCallId": { "type": "string" }, "text": { "type": "string" } },
+          "required": ["toolCallId", "text"],
+          "allOf": [{ "$ref": "#/$defs/Truncation" }]
+        },
+        {
+          "properties": { "type": { "const": "tool_end" }, "toolCallId": { "type": "string" }, "isError": { "type": "boolean" } },
+          "required": ["toolCallId", "isError"]
+        },
+        { "properties": { "type": { "const": "dialog_open" }, "dialog": { "$ref": "#/$defs/Dialog" } }, "required": ["dialog"] },
+        {
+          "properties": {
+            "type": { "const": "dialog_closed" },
+            "dialogId": { "type": "string" },
+            "closedBy": { "enum": ["terminal", "remote", "timeout", "cancelled"] }
+          },
+          "required": ["dialogId", "closedBy"]
+        },
+        { "properties": { "type": { "const": "session_replaced" }, "hostSession": { "$ref": "#/$defs/HostSession" } }, "required": ["hostSession"] },
+        { "properties": { "type": { "const": "remote_off" } } },
+        { "properties": { "type": { "const": "resync" } } }
+      ]
+    }
+  }
+}

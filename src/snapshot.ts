@@ -1,3 +1,4 @@
+import type { Dialog } from "./dialogs.ts";
 import type { ImageContent, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { PROTOCOL_VERSION } from "./server.ts";
@@ -27,11 +28,11 @@ export interface Snapshot {
 	hostSession: { id: string; cwd: string; name?: string };
 	status: "working" | "settled";
 	messages: Message[];
-	dialogs: never[];
+	dialogs: Dialog[];
 }
 
-/** Body of GET /v1/snapshot; `seq` is the last event the state reflects. Dialogs arrive with #5. */
-export function toSnapshot(sm: ExtensionContext["sessionManager"], status: Snapshot["status"], seq: number): Snapshot {
+/** Body of GET /v1/snapshot; `seq` is the last event the state reflects. `dialogs` are those still waiting for an answer. */
+export function toSnapshot(sm: ExtensionContext["sessionManager"], status: Snapshot["status"], seq: number, dialogs: Dialog[]): Snapshot {
 	const name = sm.getSessionName();
 	return {
 		protocolVersion: PROTOCOL_VERSION,
@@ -39,7 +40,7 @@ export function toSnapshot(sm: ExtensionContext["sessionManager"], status: Snaps
 		hostSession: { id: sm.getSessionId(), cwd: sm.getCwd(), ...(name ? { name } : {}) },
 		status,
 		messages: toMessages(sm.getBranch()),
-		dialogs: [],
+		dialogs,
 	};
 }
 

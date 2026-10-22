@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Dialogs, wrapDialogs } from "./dialogs.ts";
 import { PROTOCOL_MAJOR, RemoteServer } from "./server.ts";
 import { nextMessageId, toMessage, toSnapshot, toolUpdateText } from "./snapshot.ts";
 
@@ -12,10 +13,17 @@ interface RemoteSettings {
 export default function remoteExtension(pi: ExtensionAPI): void {
 	let server: RemoteServer | undefined;
 	let ctx: ExtensionContext | undefined;
+	let dialogs: Dialogs | undefined;
 	let working = false;
+	let warnedDialogs = false;
 
 	pi.on("session_start", (_event, c) => {
 		ctx = c;
+		// Wrapping depends on how Pi builds ctx.ui (ADR-0001); if that changed, remote still works minus dialogs.
+		if (!wrapDialogs(c.ui, () => dialogs) && !warnedDialogs) {
+			warnedDialogs = true;
+			c.ui.notify("Remote dialogs are unavailable: this Pi version's UI context is not what pi-idle-supervisor expects.", "warning");
+		}
 	});
 	pi.on("agent_start", () => {
 		working = true;
@@ -56,11 +64,13 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 	// Until #6 lets the next runtime adopt the server (ADR-0003), any shutdown turns remote off:
 	// this runtime's ctx is invalid afterwards, so the snapshot could not be served.
 	pi.on("session_shutdown", async () => {
+		dialogs?.dispose();
 		await server?.stop();
 		server = undefined;
+		dialogs = undefined;
 	});
 
-	const snapshot = (seq: number) => toSnapshot(ctx!.sessionManager, working ? "working" : "settled", seq);
+	const snapshot = (seq: number) => toSnapshot(ctx!.sessionManager, working ? "working" : "settled", seq, dialogs?.list() ?? []);
 
 	const prompt = (text: string, deliverAs: "steer" | "followUp" | undefined) => {
 		// Same state as the snapshot: settled starts a run and ignores deliverAs.
@@ -82,7 +92,15 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 				const settings = (pi.getSettings() as { remote?: RemoteSettings }).remote ?? {};
 				const port = settings.port ?? DEFAULT_PORT;
 				try {
-					server = await RemoteServer.start({ port, snapshot, prompt, abort: () => ctx?.abort() });
+					const started = await RemoteServer.start({
+						port,
+						snapshot,
+						prompt,
+						abort: () => ctx?.abort(),
+						answerDialog: (id, body) => dialogs?.answer(id, body) ?? "unknown",
+					});
+					server = started;
+					dialogs = new Dialogs((body) => started.emit(body));
 				} catch (error) {
 					return c.ui.notify(`Remote could not start on 127.0.0.1:${port}: ${(error as Error).message}`, "error");
 				}
@@ -90,8 +108,10 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 				c.ui.notify(`Remote is on at ${server.url}\nPair with: ${pairing}`, "info");
 			} else if (sub === "stop") {
 				if (!server) return c.ui.notify("Remote is off", "info");
+				dialogs?.dispose();
 				await server.stop();
 				server = undefined;
+				dialogs = undefined;
 				c.ui.notify("Remote is off; the access token is revoked", "info");
 			} else if (sub === "status") {
 				c.ui.notify(server ? `Remote is on at ${server.url} (port ${server.port})` : "Remote is off", "info");

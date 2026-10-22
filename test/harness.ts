@@ -31,7 +31,17 @@ export interface Notification {
 	type?: "info" | "warning" | "error";
 }
 
+/** A dialog shown on the fake terminal; `answer` is what the person would pick. */
+export interface TerminalDialog {
+	kind: "select" | "confirm" | "input";
+	title: string;
+	signal: AbortSignal | undefined;
+	answer(value: string | boolean | undefined): void;
+}
+
 export interface Host {
+	/** Dialogs the extension host (or the wrapper) opened on the terminal, oldest first. */
+	terminalDialogs: TerminalDialog[];
 	session: AgentSession;
 	faux: FauxProviderHandle;
 	/** Everything the extension showed with ctx.ui.notify, oldest first. */
@@ -77,7 +87,19 @@ export async function createHost(options: { tools?: ToolDefinition[] } = {}): Pr
 	});
 
 	const notifications: Notification[] = [];
+	const terminalDialogs: TerminalDialog[] = [];
+	// Like Pi's real dialogs: resolves with the answer, or with the cancel value when the signal aborts.
+	const open = <T>(kind: TerminalDialog["kind"], title: string, opts: { signal?: AbortSignal } | undefined, cancelled: T) =>
+		new Promise<T>((resolve) => {
+			// SAFETY: the dialog kind fixes the answer type T.
+			const answer = (value: string | boolean | undefined) => resolve(value as T);
+			terminalDialogs.push({ kind, title, signal: opts?.signal, answer });
+			opts?.signal?.addEventListener("abort", () => resolve(cancelled), { once: true });
+		});
 	const terminal: Partial<ExtensionUIContext> = {
+		select: (title, _options, opts) => open<string | undefined>("select", title, opts, undefined),
+		confirm: (title, _message, opts) => open<boolean>("confirm", title, opts, false),
+		input: (title, _placeholder, opts) => open<string | undefined>("input", title, opts, undefined),
 		notify: (message, type) => notifications.push({ message, type }),
 		setStatus: () => {},
 	};
@@ -87,6 +109,7 @@ export async function createHost(options: { tools?: ToolDefinition[] } = {}): Pr
 		session,
 		faux,
 		notifications,
+		terminalDialogs,
 		type: (line) => session.prompt(line),
 		async startRemote() {
 			const before = notifications.length;

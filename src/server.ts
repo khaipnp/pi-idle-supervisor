@@ -2,6 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { type EventBody, EventBuffer, type StoredEvent } from "./events.ts";
+import type { DialogAnswerResult } from "./dialogs.ts";
 import type { Snapshot } from "./snapshot.ts";
 
 export const PROTOCOL_VERSION = "1.0";
@@ -30,6 +31,8 @@ export interface RemoteServerOptions {
 	prompt: (text: string, deliverAs: "steer" | "followUp" | undefined) => boolean;
 	/** Stops the current run; no-op when settled. */
 	abort: () => void;
+	/** Applies a remote answer to a pending dialog. */
+	answerDialog: (id: string, body: unknown) => DialogAnswerResult;
 }
 
 /** HTTP server on 127.0.0.1 that owns the access token, auth checks, lockout and routing. */
@@ -113,7 +116,31 @@ export class RemoteServer {
 			}
 			return sendJson(res, 202, {});
 		}
+		const dialogRoute = path.match(/^\/v1\/dialogs\/([^/]+)\/answer$/);
+		if (req.method === "POST" && dialogRoute) {
+			return void this.handleDialogAnswer(dialogRoute[1], req, res).catch(() => sendFailure(res));
+		}
 		sendError(res, 404, "not_found", `No route for ${req.method} ${path}`);
+	}
+
+	private async handleDialogAnswer(rawId: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
+		const body = await readJson(req);
+		let id = rawId;
+		try {
+			id = decodeURIComponent(rawId);
+		} catch {
+			// malformed escape: no dialog can have this id; fall through as unknown
+		}
+		switch (this.options.answerDialog(id, body)) {
+			case "ok":
+				return sendJson(res, 200, {});
+			case "unknown":
+				return sendError(res, 404, "not_found", "No such dialog");
+			case "closed":
+				return sendError(res, 409, "dialog_closed", "The dialog was already answered or dismissed");
+			case "invalid":
+				return sendError(res, 400, "bad_request", 'Body must be {"value": boolean | string matching the dialog kind} or {"cancelled": true}');
+		}
 	}
 
 	private async handlePrompt(req: IncomingMessage, res: ServerResponse): Promise<void> {

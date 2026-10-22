@@ -1,7 +1,7 @@
 {
   "name": "pi-idle-supervisor",
   "version": "0.1.0",
-  "description": "Remote control for a running Pi session: watch and steer it from a remote client.",
+  "description": "Remote control for a running Pi session: watch and steer it from a remote client. Tested with Pi 1.4.x.",
   "type": "module",
   "license": "MIT",
   "keywords": [
@@ -17,7 +17,9 @@
   "files": [
     "src",
     "schema",
-    "docs/protocol.md"
+    "docs/protocol.md",
+    "README.md",
+    "LICENSE"
   ],
   "pi": {
     "extensions": [
@@ -42,5 +44,9 @@
   },
   "dependencies": {
     "uqr": "^0.1.3"
+  },
+  "homepage": "https://github.com/khaipnp/pi-idle-supervisor#readme",
+  "bugs": {
+    "url": "https://github.com/khaipnp/pi-idle-supervisor/issues"
   }
 }

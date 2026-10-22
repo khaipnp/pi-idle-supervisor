@@ -1,0 +1,118 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+	type AgentSession,
+	createAgentSession,
+	DefaultResourceLoader,
+	type ExtensionUIContext,
+	ModelRuntime,
+	SessionManager,
+	SettingsManager,
+	type ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
+import { type FauxProviderHandle, fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import { Ajv2020 } from "ajv/dist/2020.js";
+import schema from "../schema/protocol.schema.json" with { type: "json" };
+import extension from "../src/extension.ts";
+
+const ajv = new Ajv2020({ strict: false });
+ajv.addSchema(schema);
+
+/** Throws when `body` does not match `$defs/<def>` in schema/protocol.schema.json. */
+export function assertSchema(def: string, body: unknown): void {
+	const validate = ajv.getSchema(`${schema.$id}#/$defs/${def}`);
+	if (!validate) throw new Error(`no schema def ${def}`);
+	if (!validate(body)) throw new Error(`${def} invalid: ${ajv.errorsText(validate.errors)}\n${JSON.stringify(body)}`);
+}
+
+export interface Notification {
+	message: string;
+	type?: "info" | "warning" | "error";
+}
+
+export interface Host {
+	session: AgentSession;
+	faux: FauxProviderHandle;
+	/** Everything the extension showed with ctx.ui.notify, oldest first. */
+	notifications: Notification[];
+	/** Type a line into the terminal, e.g. "/remote start". */
+	type(line: string): Promise<void>;
+	/** Run `/remote start` and return the base URL and token parsed from the pairing string. */
+	startRemote(): Promise<{ url: string; token: string }>;
+	dispose(): Promise<void>;
+}
+
+export async function createHost(options: { tools?: ToolDefinition[] } = {}): Promise<Host> {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-remote-test-"));
+	const agentDir = join(cwd, "agent");
+	const faux = fauxProvider({ models: [{ id: "faux-1", input: ["text", "image"] }] });
+	const modelRuntime = await ModelRuntime.create({
+		credentials: new InMemoryCredentialStore(),
+		modelsPath: null,
+		refreshOnCreate: false,
+	});
+	modelRuntime.registerNativeProvider(faux.provider);
+	const resourceLoader = new DefaultResourceLoader({
+		cwd,
+		agentDir,
+		noExtensions: true,
+		noSkills: true,
+		noPromptTemplates: true,
+		noThemes: true,
+		noContextFiles: true,
+		extensionFactories: [extension],
+	});
+	await resourceLoader.reload();
+	const { session } = await createAgentSession({
+		cwd,
+		agentDir,
+		modelRuntime,
+		model: faux.getModel(),
+		resourceLoader,
+		sessionManager: SessionManager.inMemory(cwd),
+		settingsManager: SettingsManager.inMemory({ remote: { port: 0 } } as object),
+		noTools: "builtin",
+		customTools: options.tools,
+	});
+
+	const notifications: Notification[] = [];
+	const terminal: Partial<ExtensionUIContext> = {
+		notify: (message, type) => notifications.push({ message, type }),
+		setStatus: () => {},
+	};
+	await session.bindExtensions({ uiContext: terminal as ExtensionUIContext });
+
+	const host: Host = {
+		session,
+		faux,
+		notifications,
+		type: (line) => session.prompt(line),
+		async startRemote() {
+			const before = notifications.length;
+			await host.type("/remote start");
+			const pairing = notifications
+				.slice(before)
+				.map((n) => n.message.match(/pi-remote:\/\/pair\?\S+/)?.[0])
+				.find(Boolean);
+			if (!pairing) throw new Error(`no pairing string in ${JSON.stringify(notifications.slice(before))}`);
+			const params = new URL(pairing).searchParams;
+			return { url: params.get("url")!, token: params.get("token")! };
+		},
+		async dispose() {
+			await host.type("/remote stop");
+			session.dispose();
+		},
+	};
+	return host;
+}
+
+/** A remote client request with the documented headers, overridable per call. */
+export function remoteGet(url: string, path: string, headers: Record<string, string | undefined>): Promise<Response> {
+	const defined = Object.fromEntries(Object.entries(headers).filter(([, v]) => v !== undefined)) as Record<string, string>;
+	return fetch(url + path, { headers: defined });
+}
+
+export function clientHeaders(token: string): Record<string, string> {
+	return { Authorization: `Bearer ${token}`, "Pi-Remote-Protocol": "1.0" };
+}

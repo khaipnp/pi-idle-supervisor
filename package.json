@@ -1,0 +1,43 @@
+{
+  "name": "pi-idle-supervisor",
+  "version": "0.1.0",
+  "description": "Remote control for a running Pi session: watch and steer it from a remote client.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/khaipnp/pi-idle-supervisor.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "src",
+    "schema",
+    "docs/protocol.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/extension.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest --run"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^1.4.0",
+    "@earendil-works/pi-coding-agent": "^1.4.0",
+    "@types/node": "^26.6.5",
+    "ajv": "^8.20.0",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}

@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { type EventBody, EventBuffer, type StoredEvent } from "./events.ts";
 import type { Snapshot } from "./snapshot.ts";
 
 export const PROTOCOL_VERSION = "1.0";
@@ -9,6 +10,7 @@ export const PROTOCOL_MAJOR = PROTOCOL_VERSION.split(".")[0];
 const MAX_FAILURES = 10;
 const FAILURE_WINDOW_MS = 60_000;
 const LOCKOUT_MS = 60_000;
+const PING_INTERVAL_MS = 15_000;
 
 type ErrorCode =
 	| "unauthorized"
@@ -21,14 +23,15 @@ type ErrorCode =
 
 export interface RemoteServerOptions {
 	port: number;
-	/** Builds the body of GET /v1/snapshot for an authorised request. */
-	snapshot: () => Snapshot;
+	/** Builds the body of GET /v1/snapshot for an authorised request; `seq` is the last event so far. */
+	snapshot: (seq: number) => Snapshot;
 }
 
 /** HTTP server on 127.0.0.1 that owns the access token, auth checks, lockout and routing. */
 export class RemoteServer {
 	readonly token = randomBytes(32).toString("base64url");
 	private readonly tokenHash = sha256(this.token);
+	private readonly events = new EventBuffer();
 	private failures: number[] = [];
 	private lockedUntil = 0;
 
@@ -60,6 +63,11 @@ export class RemoteServer {
 		return `http://127.0.0.1:${this.port}`;
 	}
 
+	/** Numbers `body` and delivers it to every open event stream. */
+	emit(body: EventBody): void {
+		this.events.append(body);
+	}
+
 	/** Closes the server and every open connection; the token stops working immediately. */
 	async stop(): Promise<void> {
 		const closed = new Promise<void>((resolve) => this.server.close(() => resolve()));
@@ -85,8 +93,42 @@ export class RemoteServer {
 		}
 
 		const path = new URL(req.url ?? "/", "http://localhost").pathname;
-		if (req.method === "GET" && path === "/v1/snapshot") return sendJson(res, 200, this.options.snapshot());
+		if (req.method === "GET" && path === "/v1/snapshot") {
+			return sendJson(res, 200, this.options.snapshot(this.events.lastSeq));
+		}
+		if (req.method === "GET" && path === "/v1/events") return this.stream(req, res);
 		sendError(res, 404, "not_found", `No route for ${req.method} ${path}`);
+	}
+
+	/** SSE stream: replays events after the resume point, then continues live. */
+	private stream(req: IncomingMessage, res: ServerResponse): void {
+		const resumeAt = (req.headers["last-event-id"] as string | undefined) ?? new URL(req.url ?? "/", "http://localhost").searchParams.get("after");
+		if (resumeAt !== null && resumeAt !== undefined && !/^\d+$/.test(resumeAt)) {
+			return sendError(res, 400, "bad_request", "Last-Event-ID / after must be a non-negative integer");
+		}
+		// Without a resume point the client only wants what happens from now on.
+		const after = resumeAt === null || resumeAt === undefined ? this.events.lastSeq : Number(resumeAt);
+
+		res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
+		res.flushHeaders(); // otherwise clients wait for the first event before seeing the response
+		const write = (event: StoredEvent, withId = true) =>
+			res.write(`${withId ? `id: ${event.seq}\n` : ""}event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+
+		// Replay and subscribe in one tick so no event falls between the two.
+		const missed = this.events.replay(after);
+		if (missed === "resync") {
+			// resync is not part of the numbered sequence: it carries no SSE id, so a reconnecting
+			// EventSource keeps its old Last-Event-ID instead of adopting one that skips events.
+			write({ type: "resync", seq: Math.max(1, this.events.lastSeq) }, false);
+			return void res.end();
+		}
+		for (const event of missed) write(event);
+		const unsubscribe = this.events.subscribe(write);
+		const ping = setInterval(() => res.write(": ping\n\n"), PING_INTERVAL_MS);
+		res.on("close", () => {
+			unsubscribe();
+			clearInterval(ping);
+		});
 	}
 
 	private authorised(header: string | undefined): boolean {

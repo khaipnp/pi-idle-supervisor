@@ -116,3 +116,89 @@ export function remoteGet(url: string, path: string, headers: Record<string, str
 export function clientHeaders(token: string): Record<string, string> {
 	return { Authorization: `Bearer ${token}`, "Pi-Remote-Protocol": "1.0" };
 }
+
+export interface SseEvent {
+	id: string;
+	event: string;
+	data: { seq: number; type: string; [key: string]: unknown };
+}
+
+export interface EventStream {
+	/** Everything received so far, oldest first. */
+	events: SseEvent[];
+	/** Raw SSE comment lines (": ping") received so far. */
+	comments: string[];
+	/** Resolves once at least `count` events have arrived. */
+	waitFor(count: number): Promise<SseEvent[]>;
+	/** Resolves when an event of this type has arrived. */
+	waitForType(type: string): Promise<SseEvent>;
+	close(): void;
+}
+
+/** Opens GET /v1/events like a remote client. Events are validated against $defs/Event as they arrive. */
+export async function openEvents(
+	url: string,
+	token: string,
+	options: { lastEventId?: number; after?: number } = {},
+): Promise<EventStream> {
+	const headers: Record<string, string> = clientHeaders(token);
+	if (options.lastEventId !== undefined) headers["Last-Event-ID"] = String(options.lastEventId);
+	const controller = new AbortController();
+	const query = options.after === undefined ? "" : `?after=${options.after}`;
+	const res = await fetch(`${url}/v1/events${query}`, { headers, signal: controller.signal });
+	if (res.status !== 200) throw new Error(`events: HTTP ${res.status} ${await res.text()}`);
+
+	const events: SseEvent[] = [];
+	const comments: string[] = [];
+	const waiters: Array<() => void> = [];
+	const pump = (async () => {
+		const decoder = new TextDecoder();
+		let buffer = "";
+		try {
+			for await (const chunk of res.body!) {
+				buffer += decoder.decode(chunk, { stream: true });
+				let end: number;
+				while ((end = buffer.indexOf("\n\n")) >= 0) {
+					const block = buffer.slice(0, end);
+					buffer = buffer.slice(end + 2);
+					if (block.startsWith(":")) comments.push(block);
+					else {
+						const field = (name: string) => block.match(new RegExp(`^${name}: (.*)$`, "m"))?.[1] ?? "";
+						const data = JSON.parse(field("data"));
+						assertSchema("Event", data);
+						events.push({ id: field("id"), event: field("event"), data });
+					}
+					for (const wake of waiters.splice(0)) wake();
+				}
+			}
+		} catch {
+			// aborted by close()
+		}
+	})();
+	void pump;
+
+	const until = async (done: () => boolean) => {
+		while (!done()) {
+			await new Promise<void>((resolve, reject) => {
+				const timer = setTimeout(() => reject(new Error(`timed out; got ${JSON.stringify(events.map((e) => e.data.type))}`)), 5000);
+				waiters.push(() => {
+					clearTimeout(timer);
+					resolve();
+				});
+			});
+		}
+	};
+	return {
+		events,
+		comments,
+		async waitFor(count) {
+			await until(() => events.length >= count);
+			return events;
+		},
+		async waitForType(type) {
+			await until(() => events.some((e) => e.event === type));
+			return events.find((e) => e.event === type)!;
+		},
+		close: () => controller.abort(),
+	};
+}

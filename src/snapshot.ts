@@ -30,12 +30,12 @@ export interface Snapshot {
 	dialogs: never[];
 }
 
-/** Body of GET /v1/snapshot. `seq` stays 0 until the event log lands (#3); dialogs arrive with #5. */
-export function toSnapshot(sm: ExtensionContext["sessionManager"], status: Snapshot["status"]): Snapshot {
+/** Body of GET /v1/snapshot; `seq` is the last event the state reflects. Dialogs arrive with #5. */
+export function toSnapshot(sm: ExtensionContext["sessionManager"], status: Snapshot["status"], seq: number): Snapshot {
 	const name = sm.getSessionName();
 	return {
 		protocolVersion: PROTOCOL_VERSION,
-		seq: 0,
+		seq,
 		hostSession: { id: sm.getSessionId(), cwd: sm.getCwd(), ...(name ? { name } : {}) },
 		status,
 		messages: toMessages(sm.getBranch()),
@@ -44,30 +44,52 @@ export function toSnapshot(sm: ExtensionContext["sessionManager"], status: Snaps
 }
 
 type PiContent = TextContent | ThinkingContent | ToolCall | ImageContent;
+const PROTOCOL_ROLES = new Set(["user", "assistant", "toolResult"]);
+type PiMessage = Extract<SessionEntry, { type: "message" }>["message"];
 
 /**
- * Converts the active branch into protocol messages. Only user, assistant and toolResult
- * messages are sent; the session entry id is the stable message id.
+ * Converts a Pi message into a protocol message, or undefined for roles the protocol does not carry.
+ * Pi only assigns session entry ids after `message_end`, so the caller supplies the id (see `nextMessageId`).
  */
+export function toMessage(m: PiMessage, id: string): Message | undefined {
+	if (m.role === "user" || m.role === "assistant") {
+		const parts: PiContent[] = typeof m.content === "string" ? [{ type: "text", text: m.content }] : m.content;
+		return { id, role: m.role, timestamp: m.timestamp, content: parts.map((p) => toBlock(p, false)) };
+	}
+	if (m.role === "toolResult") {
+		return {
+			id,
+			role: "toolResult",
+			timestamp: m.timestamp,
+			content: m.content.map((p) => toBlock(p, true)),
+			toolCallId: m.toolCallId,
+			toolName: m.toolName,
+			isError: m.isError,
+		};
+	}
+	return undefined;
+}
+
+/** Message ids are the message's position in the active branch, so live events and snapshots agree. */
+const messageId = (position: number) => `m-${position}`;
+
+/** Id of the next message to be persisted on this branch. */
+export function nextMessageId(branch: SessionEntry[]): string {
+	return messageId(branch.filter((e) => e.type === "message" && PROTOCOL_ROLES.has(e.message.role)).length);
+}
+
+/** Concatenated text parts of a partial tool result, cut like snapshot tool results. */
+export function toolUpdateText(partialResult: { content?: PiContent[] } | undefined) {
+	const text = (partialResult?.content ?? []).flatMap((p) => (p.type === "text" ? [p.text] : [])).join("");
+	return truncateText(text);
+}
+
+/** The active branch as protocol messages (user, assistant and toolResult only). */
 export function toMessages(branch: SessionEntry[]): Message[] {
 	const messages: Message[] = [];
 	for (const entry of branch) {
-		if (entry.type !== "message") continue;
-		const m = entry.message;
-		if (m.role === "user" || m.role === "assistant") {
-			const parts: PiContent[] = typeof m.content === "string" ? [{ type: "text", text: m.content }] : m.content;
-			messages.push({ id: entry.id, role: m.role, timestamp: m.timestamp, content: parts.map((p) => toBlock(p, false)) });
-		} else if (m.role === "toolResult") {
-			messages.push({
-				id: entry.id,
-				role: "toolResult",
-				timestamp: m.timestamp,
-				content: m.content.map((p) => toBlock(p, true)),
-				toolCallId: m.toolCallId,
-				toolName: m.toolName,
-				isError: m.isError,
-			});
-		}
+		const message = entry.type === "message" ? toMessage(entry.message, messageId(messages.length)) : undefined;
+		if (message) messages.push(message);
 	}
 	return messages;
 }
@@ -75,7 +97,7 @@ export function toMessages(branch: SessionEntry[]): Message[] {
 function toBlock(part: PiContent, truncate: boolean): Block {
 	switch (part.type) {
 		case "text":
-			return truncate ? truncateText(part.text) : { type: "text", text: part.text };
+			return { type: "text", ...(truncate ? truncateText(part.text) : { text: part.text }) };
 		case "thinking":
 			return { type: "thinking", text: part.thinking };
 		case "toolCall":
@@ -86,11 +108,11 @@ function toBlock(part: PiContent, truncate: boolean): Block {
 }
 
 /** Cuts text to TOOL_TEXT_LIMIT UTF-8 bytes without splitting a character. */
-function truncateText(text: string): Block {
+export function truncateText(text: string): { text: string; truncated?: true; originalBytes?: number } {
 	const bytes = Buffer.from(text, "utf8");
-	if (bytes.length <= TOOL_TEXT_LIMIT) return { type: "text", text };
+	if (bytes.length <= TOOL_TEXT_LIMIT) return { text };
 	let end = TOOL_TEXT_LIMIT;
 	// Step back over continuation bytes (10xxxxxx) so the cut lands on a character start.
 	while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
-	return { type: "text", text: bytes.subarray(0, end).toString("utf8"), truncated: true, originalBytes: bytes.length };
+	return { text: bytes.subarray(0, end).toString("utf8"), truncated: true, originalBytes: bytes.length };
 }

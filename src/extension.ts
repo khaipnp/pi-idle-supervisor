@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { PROTOCOL_MAJOR, RemoteServer } from "./server.ts";
-import { toSnapshot } from "./snapshot.ts";
+import { nextMessageId, toMessage, toSnapshot, toolUpdateText } from "./snapshot.ts";
 
 const DEFAULT_PORT = 7878;
 
@@ -19,9 +19,39 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 	});
 	pi.on("agent_start", () => {
 		working = true;
+		server?.emit({ type: "status", status: "working" });
 	});
+	// agent_settled, not agent_end: agent_end fires before queued follow-ups and retries have run.
 	pi.on("agent_settled", () => {
 		working = false;
+		server?.emit({ type: "settled" });
+	});
+	const liveMessage = (message: Parameters<typeof toMessage>[0], c: ExtensionContext) =>
+		server ? toMessage(message, nextMessageId(c.sessionManager.getBranch())) : undefined;
+	pi.on("message_start", (event, c) => {
+		const message = liveMessage(event.message, c);
+		if (message) server?.emit({ type: "message_start", message });
+	});
+	pi.on("message_update", (event, c) => {
+		const update = event.assistantMessageEvent;
+		if (update.type !== "text_delta" && update.type !== "thinking_delta") return;
+		const message = liveMessage(event.message, c);
+		if (!message) return;
+		const kind = update.type === "text_delta" ? "text" : "thinking";
+		server?.emit({ type: "message_delta", messageId: message.id, blockIndex: update.contentIndex, kind, delta: update.delta });
+	});
+	pi.on("message_end", (event, c) => {
+		const message = liveMessage(event.message, c);
+		if (message) server?.emit({ type: "message_end", message });
+	});
+	pi.on("tool_execution_start", (event) => {
+		server?.emit({ type: "tool_start", toolCallId: event.toolCallId, toolName: event.toolName, arguments: event.args });
+	});
+	pi.on("tool_execution_update", (event) => {
+		server?.emit({ type: "tool_update", toolCallId: event.toolCallId, ...toolUpdateText(event.partialResult) });
+	});
+	pi.on("tool_execution_end", (event) => {
+		server?.emit({ type: "tool_end", toolCallId: event.toolCallId, isError: event.isError });
 	});
 	// Until #6 lets the next runtime adopt the server (ADR-0003), any shutdown turns remote off:
 	// this runtime's ctx is invalid afterwards, so the snapshot could not be served.
@@ -30,7 +60,7 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 		server = undefined;
 	});
 
-	const snapshot = () => toSnapshot(ctx!.sessionManager, working ? "working" : "settled");
+	const snapshot = (seq: number) => toSnapshot(ctx!.sessionManager, working ? "working" : "settled", seq);
 
 	pi.registerCommand("remote", {
 		description: "Remote control: /remote start | stop | status",

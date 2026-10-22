@@ -43,11 +43,12 @@ describe("remote on/off", () => {
 		await host.type("/remote status");
 		expect(host.notifications.at(-1)?.message).toMatch(/off/);
 
-		const { url } = await host.startRemote();
+		const { url, publicUrl } = await host.startRemote();
 		await host.type("/remote status");
 		const status = host.notifications.at(-1)!.message;
-		expect(status).toContain(url);
+		expect(status).toContain(publicUrl);
 		expect(status).toContain(`port ${new URL(url).port}`);
+		expect(status).toContain("0 clients");
 	});
 
 	test("/remote stop closes the server and revokes the token", async () => {

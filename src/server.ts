@@ -33,6 +33,8 @@ export interface RemoteServerOptions {
 	abort: () => void;
 	/** Applies a remote answer to a pending dialog. */
 	answerDialog: (id: string, body: unknown) => DialogAnswerResult;
+	/** Called with the number of connected event-stream clients whenever it changes. */
+	onClients: (count: number) => void;
 }
 
 /** HTTP server on 127.0.0.1 that owns the access token, auth checks, lockout and routing. */
@@ -51,7 +53,7 @@ export class RemoteServer {
 	) {}
 
 	/** Points the server at a new host session's runtime (ADR-0003); token, port and event log are kept. */
-	rebind(host: Pick<RemoteServerOptions, "snapshot" | "prompt" | "abort">): void {
+	rebind(host: Pick<RemoteServerOptions, "snapshot" | "prompt" | "abort" | "onClients">): void {
 		this.options = { ...this.options, ...host };
 		this.detached = false;
 	}
@@ -74,6 +76,11 @@ export class RemoteServer {
 			});
 		});
 		return remote;
+	}
+
+	/** Connected event-stream clients. */
+	get clients(): number {
+		return this.streams.size;
 	}
 
 	get port(): number {
@@ -209,10 +216,12 @@ export class RemoteServer {
 		}
 		for (const event of missed) write(event);
 		this.streams.add(res);
+		this.options.onClients(this.streams.size);
 		const unsubscribe = this.events.subscribe(write);
 		const ping = setInterval(() => res.write(": ping\n\n"), PING_INTERVAL_MS);
 		res.on("close", () => {
 			this.streams.delete(res);
+			this.options.onClients(this.streams.size);
 			unsubscribe();
 			clearInterval(ping);
 		});

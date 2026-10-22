@@ -1,12 +1,15 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { renderUnicodeCompact } from "uqr";
 import { Dialogs, wrapDialogs } from "./dialogs.ts";
-import { PROTOCOL_MAJOR, RemoteServer } from "./server.ts";
+import { clientsLabel, pairingString, resolvePublicUrl } from "./pairing.ts";
+import { RemoteServer } from "./server.ts";
 import { hostSessionOf, nextMessageId, toMessage, toSnapshot, toolUpdateText } from "./snapshot.ts";
 
 const DEFAULT_PORT = 7878;
 
 interface RemoteSettings {
 	port?: number;
+	publicUrl?: string;
 }
 
 /**
@@ -18,6 +21,8 @@ interface Shared {
 	dialogs?: Dialogs;
 	warnedDialogs?: boolean;
 	stopping?: Promise<void>;
+	/** Where clients reach the server (tunnel URL); the server itself only knows 127.0.0.1. */
+	publicUrl?: string;
 }
 const SHARED_KEY = Symbol.for("pi-idle-supervisor.remote");
 function shared(): Shared {
@@ -36,6 +41,14 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 		if (!retired) state.server?.emit(body);
 	};
 
+	const FOOTER_KEY = "remote";
+	/** Footer shows remote state and client count; undefined clears it. */
+	const refreshFooter = () => {
+		const { server } = state;
+		const text = server ? `📡 remote · ${clientsLabel(server.clients)}` : undefined;
+		if (!retired) ctx?.ui.setStatus(FOOTER_KEY, text);
+	};
+
 	pi.on("session_start", (_event, c) => {
 		ctx = c;
 		// Wrapping depends on how Pi builds ctx.ui (ADR-0001); if that changed, remote still works minus dialogs.
@@ -45,7 +58,8 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 		}
 		// A previous runtime left the server running (/new, /resume, /fork, reload): take it over.
 		if (state.server) {
-			state.server.rebind({ snapshot, prompt, abort: () => ctx?.abort() });
+			state.server.rebind({ snapshot, prompt, abort: () => ctx?.abort(), onClients: refreshFooter });
+			refreshFooter();
 			state.server.emit({ type: "session_replaced", hostSession: hostSessionOf(c.sessionManager) });
 		}
 	});
@@ -99,7 +113,8 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 	function stopRemote(): Promise<void> {
 		const { server, dialogs } = state;
 		if (!server) return state.stopping ?? Promise.resolve();
-		state.server = state.dialogs = undefined;
+		state.server = state.dialogs = state.publicUrl = undefined;
+		refreshFooter();
 		dialogs?.dispose();
 		server.emit({ type: "remote_off" });
 		return (state.stopping = server.stop().finally(() => (state.stopping = undefined)));
@@ -118,7 +133,7 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 	}
 
 	pi.registerCommand("remote", {
-		description: "Remote control: /remote start | stop | status",
+		description: "Remote control: /remote start [--url <public url>] | stop | status",
 		getArgumentCompletions: (prefix) =>
 			["start", "stop", "status"].filter((s) => s.startsWith(prefix)).map((s) => ({ value: s, label: s })),
 		handler: async (args, c) => {
@@ -126,30 +141,59 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 			const sub = args.trim().split(/\s+/)[0] || "status";
 			if (sub === "start") {
 				await state.stopping;
-				if (state.server) return c.ui.notify(`Remote is already on at ${state.server.url}`, "warning");
+				if (state.server) return c.ui.notify(`Remote is already on at ${state.publicUrl ?? state.server.url}`, "warning");
 				const settings = (pi.getSettings() as { remote?: RemoteSettings }).remote ?? {};
 				const port = settings.port ?? DEFAULT_PORT;
+				const hasFlag = /(?:^|\s)--url(?:[=\s]|$)/.test(args);
+				const flag = args.match(/(?:^|\s)--url(?:=|\s+)(?!--)(\S+)/)?.[1];
+				if (hasFlag && !flag) return c.ui.notify("Usage: /remote start --url <https url>", "error");
+				let started: RemoteServer;
 				try {
-					const started = await RemoteServer.start({
+					started = await RemoteServer.start({
 						port,
 						snapshot,
 						prompt,
 						abort: () => ctx?.abort(),
 						answerDialog: (id, body) => state.dialogs?.answer(id, body) ?? "unknown",
+						onClients: refreshFooter,
 					});
-					state.server = started;
-					state.dialogs = new Dialogs((body) => started.emit(body));
 				} catch (error) {
-					return c.ui.notify(`Remote could not start on 127.0.0.1:${port}: ${(error as Error).message}`, "error");
+					const busy = (error as NodeJS.ErrnoException).code === "EADDRINUSE";
+					const why = busy ? `port ${port} is already in use; change remote.port in settings or stop the other process` : (error as Error).message;
+					return c.ui.notify(`Remote could not start on 127.0.0.1:${port}: ${why}`, "error");
 				}
-				const pairing = `pi-remote://pair?url=${encodeURIComponent(state.server.url)}&token=${state.server.token}&v=${PROTOCOL_MAJOR}`;
-				c.ui.notify(`Remote is on at ${state.server.url}\nPair with: ${pairing}`, "info");
+				// Publish the running server at once: a second start or a quit during the URL probe must see it.
+				state.server = started;
+				state.dialogs = new Dialogs((body) => started.emit(body));
+				let publicUrl;
+				try {
+					publicUrl = await resolvePublicUrl({ flag, setting: settings.publicUrl, port: started.port });
+				} catch (error) {
+					await stopRemote();
+					return c.ui.notify(`Remote not started: ${(error as Error).message}`, "error");
+				}
+				if (state.server !== started) return; // stopped while resolving
+				state.publicUrl = publicUrl.url;
+				refreshFooter();
+				const pairing = pairingString(publicUrl.url, started.token);
+				let warning = "";
+				if (publicUrl.localOnly) {
+					warning = "\nWarning: no tunnel URL found, so only this machine can connect. Use --url, the publicUrl setting, or Tailscale.";
+				} else if (publicUrl.viaTailscale) {
+					warning = `\nNote: URL taken from Tailscale MagicDNS; make sure it forwards here (tailscale serve --bg ${started.port}).`;
+				}
+				c.ui.notify(`Remote is on at ${publicUrl.url}${warning}\n${renderUnicodeCompact(pairing)}\nPair with: ${pairing}`, "info");
 			} else if (sub === "stop") {
 				if (!state.server) return c.ui.notify("Remote is off", "info");
 				await stopRemote();
 				c.ui.notify("Remote is off; the access token is revoked", "info");
 			} else if (sub === "status") {
-				c.ui.notify(state.server ? `Remote is on at ${state.server.url} (port ${state.server.port})` : "Remote is off", "info");
+				c.ui.notify(
+					state.server
+						? `Remote is on at ${state.publicUrl} (port ${state.server.port}, ${clientsLabel(state.server.clients)})`
+						: "Remote is off",
+					"info",
+				);
 			} else {
 				c.ui.notify(`Unknown subcommand "${sub}". Use /remote start | stop | status`, "error");
 			}

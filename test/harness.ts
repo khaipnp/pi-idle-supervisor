@@ -50,14 +50,16 @@ export interface Host {
 	faux: FauxProviderHandle;
 	/** Everything the extension showed with ctx.ui.notify, oldest first. */
 	notifications: Notification[];
+	/** Latest footer text per ctx.ui.setStatus key (undefined = cleared). */
+	statuses: Map<string, string | undefined>;
 	/** Type a line into the terminal, e.g. "/remote start". */
 	type(line: string): Promise<void>;
 	/** Run `/remote start` and return the base URL and token parsed from the pairing string. */
-	startRemote(): Promise<{ url: string; token: string }>;
+	startRemote(): Promise<{ url: string; publicUrl: string; token: string }>;
 	dispose(): Promise<void>;
 }
 
-export async function createHost(options: { tools?: ToolDefinition[] } = {}): Promise<Host> {
+export async function createHost(options: { tools?: ToolDefinition[]; remote?: { port?: number; publicUrl?: string } } = {}): Promise<Host> {
 	// Remote state is process-global (ADR-0003); start every host from a clean slate.
 	delete (globalThis as { [key: symbol]: unknown })[Symbol.for("pi-idle-supervisor.remote")];
 	const cwd = mkdtempSync(join(tmpdir(), "pi-remote-test-"));
@@ -74,7 +76,7 @@ export async function createHost(options: { tools?: ToolDefinition[] } = {}): Pr
 			cwd,
 			agentDir,
 			modelRuntime,
-			settingsManager: SettingsManager.inMemory({ remote: { port: 0 } } as object),
+			settingsManager: SettingsManager.inMemory({ remote: { port: 0, publicUrl: "https://pi.example.test", ...options.remote } } as object),
 			resourceLoaderOptions: {
 				noExtensions: true,
 				noSkills: true,
@@ -100,6 +102,7 @@ export async function createHost(options: { tools?: ToolDefinition[] } = {}): Pr
 	const runtime = await createAgentSessionRuntime(createRuntime, { cwd, agentDir, sessionManager: SessionManager.inMemory(cwd) });
 
 	const notifications: Notification[] = [];
+	const statuses = new Map<string, string | undefined>();
 	const terminalDialogs: TerminalDialog[] = [];
 	// Like Pi's real dialogs: resolves with the answer, or with the cancel value when the signal aborts.
 	const open = <T>(kind: TerminalDialog["kind"], title: string, opts: { signal?: AbortSignal } | undefined, cancelled: T) =>
@@ -114,7 +117,7 @@ export async function createHost(options: { tools?: ToolDefinition[] } = {}): Pr
 		confirm: (title, _message, opts) => open<boolean>("confirm", title, opts, false),
 		input: (title, _placeholder, opts) => open<string | undefined>("input", title, opts, undefined),
 		notify: (message, type) => notifications.push({ message, type }),
-		setStatus: () => {},
+		setStatus: (key, text) => void statuses.set(key, text),
 	};
 	// SAFETY: the fake terminal implements the parts of the UI context the extension uses.
 	const bind = (session: AgentSession) => session.bindExtensions({ uiContext: terminal as ExtensionUIContext });
@@ -128,6 +131,7 @@ export async function createHost(options: { tools?: ToolDefinition[] } = {}): Pr
 		runtime,
 		faux,
 		notifications,
+		statuses,
 		terminalDialogs,
 		type: (line) => runtime.session.prompt(line),
 		async startRemote() {
@@ -139,7 +143,9 @@ export async function createHost(options: { tools?: ToolDefinition[] } = {}): Pr
 				.find(Boolean);
 			if (!pairing) throw new Error(`no pairing string in ${JSON.stringify(notifications.slice(before))}`);
 			const params = new URL(pairing).searchParams;
-			return { url: params.get("url")!, token: params.get("token")! };
+			// The pairing url is the public one; tests talk to the real loopback address.
+			const server = (globalThis as { [key: symbol]: { server?: { url: string } } })[Symbol.for("pi-idle-supervisor.remote")]?.server;
+			return { url: server!.url, publicUrl: params.get("url")!, token: params.get("token")! };
 		},
 		async dispose() {
 			await runtime.dispose(); // session_shutdown(quit) turns remote off

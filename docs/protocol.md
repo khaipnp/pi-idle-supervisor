@@ -2,7 +2,7 @@
 
 The contract between a **host session** (the `pi-idle-supervisor` extension) and a **remote client** (for example the Android app, in its own repo). Terms follow `GLOSSARY.md`.
 
-Protocol version: **1.0**. A change that breaks existing clients bumps the major version. Adding a field, event type, or endpoint bumps the minor version, and clients must ignore fields and event types they don't know.
+Protocol version: **1.1**. A change that breaks existing clients bumps the major version. Adding a field, event type, or endpoint bumps the minor version, and clients must ignore fields and event types they don't know.
 
 ## Transport
 
@@ -31,7 +31,7 @@ Clients send these headers:
 
 ```
 Authorization: Bearer <access token>
-Pi-Remote-Protocol: 1.0
+Pi-Remote-Protocol: 1.1
 ```
 
 The server checks them in this order:
@@ -46,7 +46,7 @@ Errors always use this shape:
 { "error": { "code": "unauthorized", "message": "human-readable text" } }
 ```
 
-Error codes: `unauthorized`, `rate_limited`, `protocol_mismatch`, `bad_request`, `busy`, `dialog_closed`, `not_found`.
+Error codes: `unauthorized`, `rate_limited`, `protocol_mismatch`, `bad_request`, `busy`, `dialog_closed`, `not_found`, `storage_full`.
 
 ## Endpoints
 
@@ -56,7 +56,7 @@ Returns the whole current conversation of the host session, together with the ev
 
 ```json
 {
-  "protocolVersion": "1.0",
+  "protocolVersion": "1.1",
   "seq": 1042,
   "hostSession": { "id": "…", "cwd": "/Users/me/project", "name": "optional" },
   "status": "working",
@@ -88,19 +88,38 @@ data: {"seq":1043, ...}
 - A resume point that is not a non-negative integer gets `400 bad_request`.
 - Every 15 seconds the server sends a `: ping` comment line, so that proxies and the client can detect a dead connection.
 
+### `POST /v1/files`
+
+Uploads one file so a later prompt can attach it. Added in 1.1.
+
+```
+POST /v1/files?name=report.pdf
+Content-Type: application/pdf
+
+<raw file bytes>
+```
+
+- The body is the raw file, not JSON. `name` is required; the server keeps only its last path segment and replaces unusual characters. `Content-Type` is the file's media type.
+- A file must be 1 to 12,000,000 bytes, otherwise `400 bad_request`.
+- The server keeps at most 200 MB of uploads while remote is on, then responds `507 storage_full`. Turning remote off deletes them.
+- On success the server responds `201 {"id", "name", "mimeType", "size"}`. `id` is what `attachments` takes.
+
 ### `POST /v1/prompt`
 
 Sends a prompt.
 
 ```json
-{ "text": "run the tests", "deliverAs": "steer" }
+{ "text": "run the tests", "attachments": ["3fa9c1d2e4b5a607"], "deliverAs": "steer" }
 ```
 
+- `text` is optional when `attachments` has at least one id.
+- `attachments` (added in 1.1) is optional: up to 4 distinct ids from `POST /v1/files`. An unknown id gets `404 not_found`.
+- Images (`image/png`, `image/jpeg`, `image/gif`, `image/webp`) reach Pi as images. Any other file is stored on the host machine and its path is added to the prompt text, so the agent reads it with its own tools.
 - `deliverAs` is optional and is either `"steer"` or `"followUp"`.
 - If the host session is settled, the prompt starts a run, and the server ignores `deliverAs`.
 - If the host session is working and `deliverAs` is missing, the server responds `409 busy`.
-- A body that is not JSON, is over 1 MB, has empty or non-string `text`, or has another `deliverAs` gets `400 bad_request`.
-- On success the server responds `202 {}`. The prompt then appears in the event stream like any other message.
+- A body that is not JSON, is over 1 MB, has neither non-empty `text` nor `attachments`, has a non-string `text`, malformed `attachments`, or has another `deliverAs` gets `400 bad_request`.
+- On success the server responds `202 {}`. The prompt then appears in the event stream like any other message; images appear as image blocks without bytes.
 
 ### `POST /v1/abort`
 

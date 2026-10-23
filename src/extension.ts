@@ -164,10 +164,10 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 		return toSnapshot(ctx!.sessionManager, working ? "working" : "settled", seq, state.dialogs?.list() ?? []);
 	}
 
-	function prompt(text: string, deliverAs: "steer" | "followUp" | undefined): boolean {
+	function prompt(content: Parameters<typeof pi.sendUserMessage>[0], deliverAs: "steer" | "followUp" | undefined): boolean {
 		// Same state as the snapshot: settled starts a run and ignores deliverAs.
-		if (!working) pi.sendUserMessage(text);
-		else if (deliverAs) pi.sendUserMessage(text, { deliverAs });
+		if (!working) pi.sendUserMessage(content);
+		else if (deliverAs) pi.sendUserMessage(content, { deliverAs });
 		else return false;
 		return true;
 	}

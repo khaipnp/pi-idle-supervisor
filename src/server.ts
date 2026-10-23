@@ -4,8 +4,10 @@ import type { AddressInfo } from "node:net";
 import { type EventBody, EventBuffer, type StoredEvent } from "./events.ts";
 import type { DialogAnswerResult } from "./dialogs.ts";
 import type { Snapshot } from "./snapshot.ts";
+import { MAX_ATTACHMENTS, MAX_UPLOAD_BYTES, Uploads, userContent } from "./uploads.ts";
+import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 
-export const PROTOCOL_VERSION = "1.0";
+export const PROTOCOL_VERSION = "1.1";
 export const PROTOCOL_MAJOR = PROTOCOL_VERSION.split(".")[0];
 
 const MAX_FAILURES = 10;
@@ -21,14 +23,15 @@ type ErrorCode =
 	| "bad_request"
 	| "busy"
 	| "dialog_closed"
-	| "not_found";
+	| "not_found"
+	| "storage_full";
 
 export interface RemoteServerOptions {
 	port: number;
 	/** Builds the body of GET /v1/snapshot for an authorised request; `seq` is the last event so far. */
 	snapshot: (seq: number) => Snapshot;
 	/** Sends a prompt. Returns false when the host session is working and `deliverAs` is missing. */
-	prompt: (text: string, deliverAs: "steer" | "followUp" | undefined) => boolean;
+	prompt: (content: string | (TextContent | ImageContent)[], deliverAs: "steer" | "followUp" | undefined) => boolean;
 	/** Stops the current run; no-op when settled. */
 	abort: () => void;
 	/** Applies a remote answer to a pending dialog. */
@@ -46,6 +49,7 @@ export class RemoteServer {
 	private lockedUntil = 0;
 	private detached = false;
 	private readonly streams = new Set<ServerResponse>();
+	private readonly uploads = new Uploads();
 
 	private constructor(
 		private readonly server: Server,
@@ -112,6 +116,7 @@ export class RemoteServer {
 		await Promise.race([Promise.all(ended), new Promise((resolve) => setTimeout(resolve, 1000).unref())]);
 		this.server.closeAllConnections();
 		await closed;
+		await this.uploads.dispose();
 	}
 
 	private handle(req: IncomingMessage, res: ServerResponse): void {
@@ -140,6 +145,9 @@ export class RemoteServer {
 			return sendJson(res, 200, this.options.snapshot(this.events.lastSeq));
 		}
 		if (req.method === "GET" && path === "/v1/events") return this.stream(req, res);
+		if (req.method === "POST" && path === "/v1/files") {
+			return void this.handleUpload(req, res).catch(() => sendFailure(res));
+		}
 		if (req.method === "POST" && path === "/v1/prompt") {
 			return void this.handlePrompt(req, res).catch(() => sendFailure(res));
 		}
@@ -181,15 +189,47 @@ export class RemoteServer {
 	private async handlePrompt(req: IncomingMessage, res: ServerResponse): Promise<void> {
 		const body = await readJson(req);
 		// SAFETY: body is arbitrary client JSON; every field is validated below before use.
-		const { text, deliverAs } = (typeof body === "object" && body !== null ? body : {}) as { text?: unknown; deliverAs?: unknown };
+		const { text, deliverAs, attachments } = (typeof body === "object" && body !== null ? body : {}) as {
+			text?: unknown;
+			deliverAs?: unknown;
+			attachments?: unknown;
+		};
 		const validDeliverAs = deliverAs === undefined || deliverAs === "steer" || deliverAs === "followUp";
-		if (typeof text !== "string" || text === "" || !validDeliverAs) {
-			return sendError(res, 400, "bad_request", 'Body must be {"text": non-empty string, "deliverAs"?: "steer" | "followUp"}');
+		const ids = attachments === undefined ? [] : attachments;
+		const validIds =
+			Array.isArray(ids) && ids.length <= MAX_ATTACHMENTS && ids.every((id) => typeof id === "string") && new Set(ids).size === ids.length;
+		const validText = text === undefined ? validIds && ids.length > 0 : typeof text === "string" && (text !== "" || (validIds && ids.length > 0));
+		if (!validText || !validDeliverAs || !validIds) {
+			return sendError(
+				res,
+				400,
+				"bad_request",
+				`Body must be {"text"?: string, "attachments"?: up to ${MAX_ATTACHMENTS} distinct file ids, "deliverAs"?: "steer" | "followUp"} with text or an attachment`,
+			);
 		}
-		if (!this.options.prompt(text, deliverAs)) {
+		const files = this.uploads.find(ids as string[]);
+		if (!files) return sendError(res, 404, "not_found", "An attachment id is unknown");
+		if (!this.options.prompt(userContent((text as string | undefined) ?? "", files), deliverAs)) {
 			return sendError(res, 409, "busy", "The host session is working; set deliverAs to steer or followUp");
 		}
 		sendJson(res, 202, {});
+	}
+
+	/** Stores the raw request body as a file on the host machine; the name comes from `?name=`, the type from Content-Type. */
+	private async handleUpload(req: IncomingMessage, res: ServerResponse): Promise<void> {
+		const name = new URL(req.url ?? "/", "http://localhost").searchParams.get("name");
+		const mimeType = req.headers["content-type"]?.split(";")[0].trim().toLowerCase();
+		if (!name || !mimeType || !/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(mimeType)) {
+			await readBytes(req, 0);
+			return sendError(res, 400, "bad_request", "Upload needs ?name=<file name> and a Content-Type");
+		}
+		const data = await readBytes(req, MAX_UPLOAD_BYTES);
+		if (!data || data.length === 0) {
+			return sendError(res, 400, "bad_request", `Upload must be 1 to ${MAX_UPLOAD_BYTES} bytes`);
+		}
+		const file = await this.uploads.save(name, mimeType, data);
+		if (!file) return sendError(res, 507, "storage_full", "The host has stored too many uploads; turn remote off and on to clear them");
+		sendJson(res, 201, { id: file.id, name: file.name, mimeType: file.mimeType, size: file.size });
 	}
 
 	/** SSE stream: replays events after the resume point, then continues live. */
@@ -243,19 +283,25 @@ export class RemoteServer {
 	}
 }
 
-/** Reads a JSON request body (max 1 MB). Returns undefined when it is too large or not valid JSON. */
-async function readJson(req: IncomingMessage): Promise<unknown> {
+/** Reads a request body of at most `limit` bytes. Returns undefined when it is larger. */
+async function readBytes(req: IncomingMessage, limit: number): Promise<Buffer | undefined> {
 	const chunks: Buffer[] = [];
 	let size = 0;
 	// SAFETY: a request without setEncoding() yields Buffer chunks.
 	for await (const chunk of req as AsyncIterable<Buffer>) {
 		size += chunk.length;
 		// Keep draining instead of returning, so the client gets its 400 rather than a reset connection.
-		if (size <= MAX_BODY_BYTES) chunks.push(chunk);
+		if (size <= limit) chunks.push(chunk);
 	}
-	if (size > MAX_BODY_BYTES) return undefined;
+	return size > limit ? undefined : Buffer.concat(chunks);
+}
+
+/** Reads a JSON request body (max 1 MB). Returns undefined when it is too large or not valid JSON. */
+async function readJson(req: IncomingMessage): Promise<unknown> {
+	const bytes = await readBytes(req, MAX_BODY_BYTES);
+	if (!bytes) return undefined;
 	try {
-		return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+		return JSON.parse(bytes.toString("utf8"));
 	} catch {
 		return undefined;
 	}

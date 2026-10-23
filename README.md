@@ -2,7 +2,8 @@
 
 Watch and steer a running [Pi](https://github.com/earendil-works/pi) session from another device. The extension runs a small HTTP server on your machine. A remote client (for example an Android app) pairs with a QR code, streams the conversation, sends prompts, and answers permission dialogs while you are away from the terminal.
 
-- No relay and no account. You expose the local server through your own tunnel (Tailscale Serve or Cloudflare Tunnel), so nobody else sees the conversation. See `docs/adr/0002-local-server-no-relay.md`.
+- No relay and no account. You expose the local server through your own tunnel (Tailscale Serve, a named Cloudflare Tunnel, or the built-in `--tunnel ssh` option), so nobody else sees the conversation unless you pick the third-party option. See `docs/adr/0002-local-server-no-relay.md` and `docs/adr/0004-optional-ssh-tunnel-through-localhost-run.md`.
+- Remote clients can attach images and files to a prompt (see below).
 - Works with Pi 1.4.x and Node 22 or newer.
 
 ## Install
@@ -101,6 +102,17 @@ Pass the https address of your named tunnel explicitly, or set `remote.publicUrl
 ```text
 /remote start --url https://my-tunnel.example.com
 ```
+
+## Attachments
+
+A remote client can upload files and attach up to 4 of them to one prompt.
+
+- Images (PNG, JPEG, GIF, WebP) reach Pi as images.
+- Any other file is saved on your computer and its path is added to the prompt text, so the agent reads it with its own tools.
+- Limits: 12 MB per file and 200 MB in total while remote is on.
+- Uploads live in a private temporary folder and are deleted when remote turns off or Pi quits.
+
+This is protocol 1.1. Clients written for 1.0 keep working. Details are in `docs/protocol.md`.
 
 ## Pairing
 

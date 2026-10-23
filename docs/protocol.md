@@ -6,8 +6,8 @@ Protocol version: **1.1**. A change that breaks existing clients bumps the major
 
 ## Transport
 
-- HTTP/1.1. The server listens on `127.0.0.1` only (default port `7878`).
-- The pairing `url` is chosen in this order: `/remote start --url <url>`, the `remote.publicUrl` setting, this machine's Tailscale MagicDNS name, then `http://127.0.0.1:<port>`. The last works only on the host machine, and the extension warns about it. Remote URLs must be `https`. Remote clients reach it through a tunnel the person sets up (Tailscale Serve, Cloudflare Tunnel), which provides HTTPS. See ADR-0002.
+- HTTP/1.1. The server listens on `127.0.0.1` (default port `7878`), or in LAN mode on one private IPv4 address of the host.
+- The pairing `url` is chosen in this order: the way to connect the person picked (LAN, Tailscale, localhost.run tunnel, or `--url <url>`), the `remote.publicUrl` setting, the `remote.tunnel` setting, this machine's Tailscale MagicDNS name, then `http://127.0.0.1:<port>`. The last works only on the host machine, and the extension warns about it. Remote URLs are `https`, provided by a tunnel the person sets up (Tailscale Serve, Cloudflare Tunnel, localhost.run). The exception is LAN mode, where `url` is `http://<private IPv4>:<port>`; clients must allow cleartext http to private addresses to support it. See ADR-0002 and ADR-0005.
 - Every path starts with `/v1`.
 - Request and response bodies are JSON (`Content-Type: application/json`, UTF-8). The event stream is `text/event-stream`.
 

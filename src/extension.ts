@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { renderUnicodeCompact } from "uqr";
 import { Dialogs, wrapDialogs } from "./dialogs.ts";
-import { clientsLabel, pairingString, resolvePublicUrl } from "./pairing.ts";
+import { clientsLabel, lanAddress, pairingString, probeTailscale, type PublicUrl, resolvePublicUrl } from "./pairing.ts";
 import { RemoteServer } from "./server.ts";
 import { hostSessionOf, nextMessageId, toMessage, toSnapshot, toolUpdateText } from "./snapshot.ts";
 import { startSshTunnel, type Tunnel } from "./tunnel.ts";
@@ -16,6 +16,9 @@ interface RemoteSettings {
 	/** "ssh" opens a localhost.run tunnel. Unset: use `publicUrl` or Tailscale. */
 	tunnel?: string;
 }
+
+/** How the phone reaches the server. "auto": --url, then publicUrl, then Tailscale if running, then localhost. */
+type Mode = "auto" | "lan" | "tailscale" | "ssh";
 
 /** Value of `--name <value>` or `--name=<value>`; `""` when the flag has no value, undefined when absent. */
 function flagValue(args: string, name: string): string | undefined {
@@ -39,7 +42,7 @@ interface Shared {
 	dialogs?: Dialogs;
 	warnedDialogs?: boolean;
 	stopping?: Promise<void>;
-	/** Where clients reach the server (tunnel URL); the server itself only knows 127.0.0.1. */
+	/** Where clients reach the server: a tunnel URL, or the LAN address the server listens on. */
 	publicUrl?: string;
 	/** The tunnel this extension opened for the server, if any; it lives and dies with the server. */
 	tunnel?: Tunnel;
@@ -172,92 +175,134 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 		return true;
 	}
 
+	/** Ways a phone can reach the server, as offered by `/remote` with no arguments. */
+	const PICKS: Record<Exclude<Mode, "auto">, string> = {
+		lan: "LAN: devices on the same Wi-Fi or network (plain http, no setup)",
+		tailscale: "Tailscale: devices signed in to your tailnet (needs tailscale serve)",
+		ssh: "Tunnel: a public address through localhost.run (relayed, no setup)",
+	};
+
+	function showStatus(c: ExtensionContext) {
+		c.ui.notify(
+			state.server
+				? `Remote is on at ${state.publicUrl} (port ${state.server.port}, ${clientsLabel(state.server.clients)})`
+				: "Remote is off",
+			"info",
+		);
+	}
+
+	async function startRemote(c: ExtensionContext, mode: Mode, flag: string | undefined, settings: RemoteSettings) {
+		const port = settings.port ?? DEFAULT_PORT;
+		let host = "127.0.0.1";
+		if (mode === "lan") {
+			const address = lanAddress();
+			if (!address) return c.ui.notify("Remote not started: this machine has no private network address. Connect to Wi-Fi or Ethernet first.", "error");
+			host = address;
+		}
+		let started: RemoteServer;
+		try {
+			started = await RemoteServer.start({
+				host,
+				port,
+				snapshot,
+				prompt,
+				abort: () => ctx?.abort(),
+				answerDialog: (id, body) => state.dialogs?.answer(id, body) ?? "unknown",
+				onClients: refreshFooter,
+			});
+		} catch (error) {
+			const busy = (error as NodeJS.ErrnoException).code === "EADDRINUSE";
+			const why = busy ? `port ${port} is already in use; change remote.port in settings or stop the other process` : (error as Error).message;
+			return c.ui.notify(`Remote could not start on ${host}:${port}: ${why}`, "error");
+		}
+		// Publish the running server at once: a second start or a quit during the URL probe must see it.
+		state.server = started;
+		state.dialogs = new Dialogs((body) => started.emit(body));
+		let publicUrl: PublicUrl & { viaSsh?: boolean; viaLan?: boolean };
+		let tunnel: Tunnel | undefined;
+		try {
+			if (mode === "ssh") {
+				c.ui.notify("Opening a localhost.run tunnel over ssh...", "info");
+				tunnel = await startSshTunnel({ port: started.port });
+				publicUrl = { url: tunnel.url, localOnly: false, viaSsh: true };
+			} else if (mode === "lan") {
+				publicUrl = { url: `http://${host}:${started.port}`, localOnly: false, viaLan: true };
+			} else if (mode === "tailscale") {
+				const url = await probeTailscale();
+				if (!url) throw new Error("Tailscale is not installed or not running on this machine. Turn it on, or pick another way to connect.");
+				publicUrl = { url, localOnly: false, viaTailscale: true };
+			} else {
+				publicUrl = await resolvePublicUrl({ flag, setting: settings.publicUrl, port: started.port });
+			}
+		} catch (error) {
+			await stopRemote();
+			return c.ui.notify(`Remote not started: ${(error as Error).message}`, "error");
+		}
+		if (state.server !== started) return tunnel?.stop(); // stopped while resolving
+		if (tunnel) {
+			state.tunnel = tunnel;
+			tunnel.onClose = onTunnelClose;
+			if (tunnel.closedReason) return onTunnelClose(tunnel.closedReason);
+		}
+		state.publicUrl = publicUrl.url;
+		refreshFooter();
+		const pairing = pairingString(publicUrl.url, started.token);
+		let warning = "";
+		if (publicUrl.localOnly) {
+			warning = "\nWarning: no tunnel URL found, so only this machine can connect. Run /remote to pick LAN, Tailscale or a tunnel, or set remote.publicUrl.";
+		} else if (publicUrl.viaLan) {
+			warning = "\nNote: LAN mode uses plain http. Anyone on this network who captures the traffic can read the conversation and the access token, so use it only on a network you trust. The phone must be on the same network.";
+		} else if (publicUrl.viaSsh) {
+			warning = "\nNote: localhost.run relays this traffic and can read it, and the address changes after a few hours. For private work use Tailscale.";
+		} else if (publicUrl.viaTailscale) {
+			warning = `\nNote: URL taken from Tailscale MagicDNS; make sure it forwards here (tailscale serve --bg ${started.port}).`;
+		}
+		c.ui.notify(`Remote is on at ${publicUrl.url}${warning}\n${renderUnicodeCompact(pairing)}\nPair with: ${pairing}`, "info");
+	}
+
 	pi.registerCommand("remote", {
-		description: "Remote control: /remote start [--url <public url> | --tunnel ssh] | stop | status",
+		description: "Remote control: /remote (pick how to connect) | start [--lan | --tailscale | --tunnel ssh | --url <https url>] | stop | status",
 		getArgumentCompletions: (prefix) =>
 			["start", "stop", "status"].filter((s) => s.startsWith(prefix)).map((s) => ({ value: s, label: s })),
 		handler: async (args, c) => {
 			ctx = c;
-			const sub = args.trim().split(/\s+/)[0] || "status";
+			const sub = args.trim().split(/\s+/)[0];
+			const settings = (pi.getSettings() as { remote?: RemoteSettings }).remote ?? {};
+			if (!sub) {
+				await state.stopping;
+				if (state.server || !c.hasUI) return showStatus(c);
+				const choice = await c.ui.select("Turn remote on. How will your phone connect?", Object.values(PICKS));
+				const mode = (Object.keys(PICKS) as (keyof typeof PICKS)[]).find((key) => PICKS[key] === choice);
+				if (!mode || state.server) return;
+				return startRemote(c, mode, undefined, settings);
+			}
 			if (sub === "start") {
 				await state.stopping;
 				if (state.server) return c.ui.notify(`Remote is already on at ${state.publicUrl ?? state.server.url}`, "warning");
-				const settings = (pi.getSettings() as { remote?: RemoteSettings }).remote ?? {};
-				const port = settings.port ?? DEFAULT_PORT;
 				const flag = flagValue(args, "url");
 				if (flag === "") return c.ui.notify("Usage: /remote start --url <https url>", "error");
 				const tunnelFlag = flagValue(args, "tunnel");
 				if (tunnelFlag !== undefined && tunnelFlag !== "ssh") return c.ui.notify("Usage: /remote start --tunnel ssh", "error");
-				if (flag !== undefined && tunnelFlag !== undefined) return c.ui.notify("Use either --url or --tunnel, not both", "error");
+				const tokens = args.trim().split(/\s+/);
+				const lan = tokens.includes("--lan");
+				const tailscale = tokens.includes("--tailscale");
+				const chosen = [flag !== undefined && "--url", tunnelFlag !== undefined && "--tunnel", lan && "--lan", tailscale && "--tailscale"].filter(Boolean);
+				if (chosen.length > 1) return c.ui.notify(`Use only one of ${chosen.join(", ")}`, "error");
 				if (settings.tunnel !== undefined && settings.tunnel !== "ssh") {
 					return c.ui.notify(`remote.tunnel must be "ssh", got "${settings.tunnel}"`, "error");
 				}
-				// An address typed now beats the settings; an explicit URL (flag or setting) beats a tunnel setting.
-				const useTunnel = flag === undefined && (tunnelFlag ?? (settings.publicUrl ? undefined : settings.tunnel)) === "ssh";
-				let started: RemoteServer;
-				try {
-					started = await RemoteServer.start({
-						port,
-						snapshot,
-						prompt,
-						abort: () => ctx?.abort(),
-						answerDialog: (id, body) => state.dialogs?.answer(id, body) ?? "unknown",
-						onClients: refreshFooter,
-					});
-				} catch (error) {
-					const busy = (error as NodeJS.ErrnoException).code === "EADDRINUSE";
-					const why = busy ? `port ${port} is already in use; change remote.port in settings or stop the other process` : (error as Error).message;
-					return c.ui.notify(`Remote could not start on 127.0.0.1:${port}: ${why}`, "error");
-				}
-				// Publish the running server at once: a second start or a quit during the URL probe must see it.
-				state.server = started;
-				state.dialogs = new Dialogs((body) => started.emit(body));
-				let publicUrl: Awaited<ReturnType<typeof resolvePublicUrl>> & { viaSsh?: boolean };
-				let tunnel: Tunnel | undefined;
-				try {
-					if (useTunnel) {
-						c.ui.notify("Opening a localhost.run tunnel over ssh...", "info");
-						tunnel = await startSshTunnel({ port: started.port });
-						publicUrl = { url: tunnel.url, localOnly: false, viaSsh: true };
-					} else {
-						publicUrl = await resolvePublicUrl({ flag, setting: settings.publicUrl, port: started.port });
-					}
-				} catch (error) {
-					await stopRemote();
-					return c.ui.notify(`Remote not started: ${(error as Error).message}`, "error");
-				}
-				if (state.server !== started) return tunnel?.stop(); // stopped while resolving
-				if (tunnel) {
-					state.tunnel = tunnel;
-					tunnel.onClose = onTunnelClose;
-					if (tunnel.closedReason) return onTunnelClose(tunnel.closedReason);
-				}
-				state.publicUrl = publicUrl.url;
-				refreshFooter();
-				const pairing = pairingString(publicUrl.url, started.token);
-				let warning = "";
-				if (publicUrl.localOnly) {
-					warning = "\nWarning: no tunnel URL found, so only this machine can connect. Use --tunnel ssh, --url, the publicUrl setting, or turn Tailscale on (it must be running to be detected).";
-				} else if (publicUrl.viaSsh) {
-					warning = "\nNote: localhost.run relays this traffic and can read it, and the address changes after a few hours. For private work use Tailscale.";
-				} else if (publicUrl.viaTailscale) {
-					warning = `\nNote: URL taken from Tailscale MagicDNS; make sure it forwards here (tailscale serve --bg ${started.port}).`;
-				}
-				c.ui.notify(`Remote is on at ${publicUrl.url}${warning}\n${renderUnicodeCompact(pairing)}\nPair with: ${pairing}`, "info");
-			} else if (sub === "stop") {
+				// A choice typed now beats the settings; an explicit URL (flag or setting) beats a tunnel setting.
+				const tunnelSetting = flag === undefined && !settings.publicUrl && settings.tunnel === "ssh";
+				const mode: Mode = lan ? "lan" : tailscale ? "tailscale" : tunnelFlag === "ssh" || tunnelSetting ? "ssh" : "auto";
+				return startRemote(c, mode, flag, settings);
+			}
+			if (sub === "stop") {
 				if (!state.server) return c.ui.notify("Remote is off", "info");
 				await stopRemote();
-				c.ui.notify("Remote is off; the access token is revoked", "info");
-			} else if (sub === "status") {
-				c.ui.notify(
-					state.server
-						? `Remote is on at ${state.publicUrl} (port ${state.server.port}, ${clientsLabel(state.server.clients)})`
-						: "Remote is off",
-					"info",
-				);
-			} else {
-				c.ui.notify(`Unknown subcommand "${sub}". Use /remote start | stop | status`, "error");
+				return c.ui.notify("Remote is off; the access token is revoked", "info");
 			}
+			if (sub === "status") return showStatus(c);
+			c.ui.notify(`Unknown subcommand "${sub}". Use /remote, or /remote start | stop | status`, "error");
 		},
 	});
 }

@@ -38,6 +38,8 @@ export interface Notification {
 export interface TerminalDialog {
 	kind: "select" | "confirm" | "input";
 	title: string;
+	/** The choices of a select dialog. */
+	options?: string[];
 	signal: AbortSignal | undefined;
 	answer(value: string | boolean | undefined): void;
 }
@@ -105,15 +107,15 @@ export async function createHost(options: { tools?: ToolDefinition[]; remote?: {
 	const statuses = new Map<string, string | undefined>();
 	const terminalDialogs: TerminalDialog[] = [];
 	// Like Pi's real dialogs: resolves with the answer, or with the cancel value when the signal aborts.
-	const open = <T>(kind: TerminalDialog["kind"], title: string, opts: { signal?: AbortSignal } | undefined, cancelled: T) =>
+	const open = <T>(kind: TerminalDialog["kind"], title: string, opts: { signal?: AbortSignal } | undefined, cancelled: T, options?: string[]) =>
 		new Promise<T>((resolve) => {
 			// SAFETY: the dialog kind fixes the answer type T.
 			const answer = (value: string | boolean | undefined) => resolve(value as T);
-			terminalDialogs.push({ kind, title, signal: opts?.signal, answer });
+			terminalDialogs.push({ kind, title, options, signal: opts?.signal, answer });
 			opts?.signal?.addEventListener("abort", () => resolve(cancelled), { once: true });
 		});
 	const terminal: Partial<ExtensionUIContext> = {
-		select: (title, _options, opts) => open<string | undefined>("select", title, opts, undefined),
+		select: (title, options, opts) => open<string | undefined>("select", title, opts, undefined, options),
 		confirm: (title, _message, opts) => open<boolean>("confirm", title, opts, false),
 		input: (title, _placeholder, opts) => open<string | undefined>("input", title, opts, undefined),
 		notify: (message, type) => notifications.push({ message, type }),

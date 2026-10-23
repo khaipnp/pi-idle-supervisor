@@ -27,6 +27,8 @@ type ErrorCode =
 	| "storage_full";
 
 export interface RemoteServerOptions {
+	/** Address to listen on: 127.0.0.1 behind a tunnel, or this machine's private LAN address. Default 127.0.0.1. */
+	host?: string;
 	port: number;
 	/** Builds the body of GET /v1/snapshot for an authorised request; `seq` is the last event so far. */
 	snapshot: (seq: number) => Snapshot;
@@ -40,7 +42,7 @@ export interface RemoteServerOptions {
 	onClients: (count: number) => void;
 }
 
-/** HTTP server on 127.0.0.1 that owns the access token, auth checks, lockout and routing. */
+/** HTTP server on one local address that owns the access token, auth checks, lockout and routing. */
 export class RemoteServer {
 	readonly token = randomBytes(32).toString("base64url");
 	private readonly tokenHash = sha256(this.token);
@@ -67,14 +69,14 @@ export class RemoteServer {
 		this.detached = true;
 	}
 
-	/** Binds 127.0.0.1:<port>. Rejects (e.g. EADDRINUSE) instead of falling back to another port. */
+	/** Binds <host>:<port>. Rejects (e.g. EADDRINUSE) instead of falling back to another port. */
 	static async start(options: RemoteServerOptions): Promise<RemoteServer> {
 		const server = createServer();
 		const remote = new RemoteServer(server, options);
 		server.on("request", (req, res) => remote.handle(req, res));
 		await new Promise<void>((resolve, reject) => {
 			server.once("error", reject);
-			server.listen(options.port, "127.0.0.1", () => {
+			server.listen(options.port, options.host ?? "127.0.0.1", () => {
 				server.off("error", reject);
 				resolve();
 			});
@@ -92,7 +94,7 @@ export class RemoteServer {
 	}
 
 	get url(): string {
-		return `http://127.0.0.1:${this.port}`;
+		return `http://${(this.server.address() as AddressInfo).address}:${this.port}`;
 	}
 
 	/** Numbers `body` and delivers it to every open event stream. */

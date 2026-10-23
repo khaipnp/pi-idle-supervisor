@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { networkInterfaces } from "node:os";
 import { PROTOCOL_MAJOR } from "./server.ts";
 
 export interface PublicUrl {
@@ -54,7 +55,7 @@ function tailscaleStatus(command: string): Promise<string | undefined> {
 }
 
 /** MagicDNS address of this machine, or undefined when Tailscale is missing or not running. */
-async function probeTailscale(): Promise<string | undefined> {
+export async function probeTailscale(): Promise<string | undefined> {
 	for (const command of TAILSCALE_COMMANDS) {
 		const output = await tailscaleStatus(command);
 		if (output !== undefined) return magicDnsUrl(output);
@@ -78,6 +79,22 @@ export async function resolvePublicUrl(sources: {
 	const magic = await (sources.tailscale ?? probeTailscale)();
 	if (magic) return { url: magic, localOnly: false, viaTailscale: true };
 	return { url: `http://127.0.0.1:${sources.port}`, localOnly: true };
+}
+
+/** 10.x, 172.16-31.x and 192.168.x: addresses that only exist inside a home or office network. */
+function isPrivateIPv4(address: string): boolean {
+	const [a, b] = address.split(".").map(Number);
+	return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
+
+/** This machine's first private IPv4 address, which phones on the same Wi-Fi can reach; undefined when it has none. */
+export function lanAddress(interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces()): string | undefined {
+	for (const list of Object.values(interfaces)) {
+		for (const entry of list ?? []) {
+			if (entry.family === "IPv4" && !entry.internal && isPrivateIPv4(entry.address)) return entry.address;
+		}
+	}
+	return undefined;
 }
 
 export function pairingString(url: string, token: string): string {

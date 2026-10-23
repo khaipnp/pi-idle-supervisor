@@ -59,7 +59,7 @@ export interface Host {
 	dispose(): Promise<void>;
 }
 
-export async function createHost(options: { tools?: ToolDefinition[]; remote?: { port?: number; publicUrl?: string } } = {}): Promise<Host> {
+export async function createHost(options: { tools?: ToolDefinition[]; remote?: { port?: number; publicUrl?: string; tunnel?: string } } = {}): Promise<Host> {
 	// Remote state is process-global (ADR-0003); start every host from a clean slate.
 	delete (globalThis as { [key: symbol]: unknown })[Symbol.for("pi-idle-supervisor.remote")];
 	const cwd = mkdtempSync(join(tmpdir(), "pi-remote-test-"));

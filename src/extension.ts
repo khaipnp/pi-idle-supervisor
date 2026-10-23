@@ -4,6 +4,7 @@ import { Dialogs, wrapDialogs } from "./dialogs.ts";
 import { clientsLabel, pairingString, resolvePublicUrl } from "./pairing.ts";
 import { RemoteServer } from "./server.ts";
 import { hostSessionOf, nextMessageId, toMessage, toSnapshot, toolUpdateText } from "./snapshot.ts";
+import { startSshTunnel, type Tunnel } from "./tunnel.ts";
 
 const DEFAULT_PORT = 7878;
 /** How long the server waits for a replacement session before giving up and turning remote off. */
@@ -12,6 +13,21 @@ export const REPLACEMENT_TIMEOUT_MS = 30_000;
 interface RemoteSettings {
 	port?: number;
 	publicUrl?: string;
+	/** "ssh" opens a localhost.run tunnel. Unset: use `publicUrl` or Tailscale. */
+	tunnel?: string;
+}
+
+/** Value of `--name <value>` or `--name=<value>`; `""` when the flag has no value, undefined when absent. */
+function flagValue(args: string, name: string): string | undefined {
+	const tokens = args.trim().split(/\s+/);
+	for (const [i, token] of tokens.entries()) {
+		if (token.startsWith(`--${name}=`)) return token.slice(name.length + 3);
+		if (token === `--${name}`) {
+			const next = tokens[i + 1];
+			return next && !next.startsWith("--") ? next : "";
+		}
+	}
+	return undefined;
 }
 
 /**
@@ -25,6 +41,8 @@ interface Shared {
 	stopping?: Promise<void>;
 	/** Where clients reach the server (tunnel URL); the server itself only knows 127.0.0.1. */
 	publicUrl?: string;
+	/** The tunnel this extension opened for the server, if any; it lives and dies with the server. */
+	tunnel?: Tunnel;
 	replacementTimer?: ReturnType<typeof setTimeout>;
 }
 const SHARED_KEY = Symbol.for("pi-idle-supervisor.remote");
@@ -64,6 +82,10 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 		if (state.server) {
 			state.server.rebind({ snapshot, prompt, abort: () => ctx?.abort(), onClients: refreshFooter });
 			refreshFooter();
+			if (state.tunnel) {
+				state.tunnel.onClose = onTunnelClose;
+				if (state.tunnel.closedReason) onTunnelClose(state.tunnel.closedReason); // it ended between sessions
+			}
 			state.server.emit({ type: "session_replaced", hostSession: hostSessionOf(c.sessionManager) });
 		}
 	});
@@ -123,11 +145,19 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 		const { server, dialogs } = state;
 		if (!server) return state.stopping ?? Promise.resolve();
 		clearTimeout(state.replacementTimer);
-		state.server = state.dialogs = state.publicUrl = undefined;
+		state.tunnel?.stop();
+		state.server = state.dialogs = state.publicUrl = state.tunnel = undefined;
 		refreshFooter();
 		dialogs?.dispose();
 		server.emit({ type: "remote_off" });
 		return (state.stopping = server.stop().finally(() => (state.stopping = undefined)));
+	}
+
+	/** A tunnel that ends on its own gets a new URL when restarted, so remote turns off and the old QR code dies with it. */
+	function onTunnelClose(reason: string) {
+		if (retired) return;
+		void stopRemote();
+		ctx?.ui.notify(`Remote turned off: the tunnel ended (${reason}). Run /remote start for a new address and QR code.`, "warning");
 	}
 
 	function snapshot(seq: number) {
@@ -143,7 +173,7 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 	}
 
 	pi.registerCommand("remote", {
-		description: "Remote control: /remote start [--url <public url>] | stop | status",
+		description: "Remote control: /remote start [--url <public url> | --tunnel ssh] | stop | status",
 		getArgumentCompletions: (prefix) =>
 			["start", "stop", "status"].filter((s) => s.startsWith(prefix)).map((s) => ({ value: s, label: s })),
 		handler: async (args, c) => {
@@ -154,9 +184,16 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 				if (state.server) return c.ui.notify(`Remote is already on at ${state.publicUrl ?? state.server.url}`, "warning");
 				const settings = (pi.getSettings() as { remote?: RemoteSettings }).remote ?? {};
 				const port = settings.port ?? DEFAULT_PORT;
-				const hasFlag = /(?:^|\s)--url(?:[=\s]|$)/.test(args);
-				const flag = args.match(/(?:^|\s)--url(?:=|\s+)(?!--)(\S+)/)?.[1];
-				if (hasFlag && !flag) return c.ui.notify("Usage: /remote start --url <https url>", "error");
+				const flag = flagValue(args, "url");
+				if (flag === "") return c.ui.notify("Usage: /remote start --url <https url>", "error");
+				const tunnelFlag = flagValue(args, "tunnel");
+				if (tunnelFlag !== undefined && tunnelFlag !== "ssh") return c.ui.notify("Usage: /remote start --tunnel ssh", "error");
+				if (flag !== undefined && tunnelFlag !== undefined) return c.ui.notify("Use either --url or --tunnel, not both", "error");
+				if (settings.tunnel !== undefined && settings.tunnel !== "ssh") {
+					return c.ui.notify(`remote.tunnel must be "ssh", got "${settings.tunnel}"`, "error");
+				}
+				// An address typed now beats the settings; an explicit URL (flag or setting) beats a tunnel setting.
+				const useTunnel = flag === undefined && (tunnelFlag ?? (settings.publicUrl ? undefined : settings.tunnel)) === "ssh";
 				let started: RemoteServer;
 				try {
 					started = await RemoteServer.start({
@@ -175,20 +212,34 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 				// Publish the running server at once: a second start or a quit during the URL probe must see it.
 				state.server = started;
 				state.dialogs = new Dialogs((body) => started.emit(body));
-				let publicUrl;
+				let publicUrl: Awaited<ReturnType<typeof resolvePublicUrl>> & { viaSsh?: boolean };
+				let tunnel: Tunnel | undefined;
 				try {
-					publicUrl = await resolvePublicUrl({ flag, setting: settings.publicUrl, port: started.port });
+					if (useTunnel) {
+						c.ui.notify("Opening a localhost.run tunnel over ssh...", "info");
+						tunnel = await startSshTunnel({ port: started.port });
+						publicUrl = { url: tunnel.url, localOnly: false, viaSsh: true };
+					} else {
+						publicUrl = await resolvePublicUrl({ flag, setting: settings.publicUrl, port: started.port });
+					}
 				} catch (error) {
 					await stopRemote();
 					return c.ui.notify(`Remote not started: ${(error as Error).message}`, "error");
 				}
-				if (state.server !== started) return; // stopped while resolving
+				if (state.server !== started) return tunnel?.stop(); // stopped while resolving
+				if (tunnel) {
+					state.tunnel = tunnel;
+					tunnel.onClose = onTunnelClose;
+					if (tunnel.closedReason) return onTunnelClose(tunnel.closedReason);
+				}
 				state.publicUrl = publicUrl.url;
 				refreshFooter();
 				const pairing = pairingString(publicUrl.url, started.token);
 				let warning = "";
 				if (publicUrl.localOnly) {
-					warning = "\nWarning: no tunnel URL found, so only this machine can connect. Use --url, the publicUrl setting, or Tailscale.";
+					warning = "\nWarning: no tunnel URL found, so only this machine can connect. Use --tunnel ssh, --url, the publicUrl setting, or Tailscale.";
+				} else if (publicUrl.viaSsh) {
+					warning = "\nNote: localhost.run relays this traffic and can read it, and the address changes after a few hours. For private work use Tailscale.";
 				} else if (publicUrl.viaTailscale) {
 					warning = `\nNote: URL taken from Tailscale MagicDNS; make sure it forwards here (tailscale serve --bg ${started.port}).`;
 				}

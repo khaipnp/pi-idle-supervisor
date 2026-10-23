@@ -24,7 +24,7 @@ Restart Pi (or run `/reload`). The extension does nothing until you run `/remote
 
 | Command | Effect |
 | --- | --- |
-| `/remote start [--url <https url>]` | Starts the server, creates a fresh access token, and shows a QR code and a `pi-remote://pair?...` string. |
+| `/remote start [--url <https url> \| --tunnel ssh]` | Starts the server, creates a fresh access token, and shows a QR code and a `pi-remote://pair?...` string. `--tunnel ssh` also opens a localhost.run tunnel (see below). |
 | `/remote stop` | Closes the server and revokes the token. |
 | `/remote status` | Shows whether remote is on, the public URL, the port and the number of connected clients. |
 
@@ -40,20 +40,23 @@ Add a `remote` object to `~/.pi/agent/settings.json` (or the project's `.pi/sett
 {
   "remote": {
     "port": 7878,
-    "publicUrl": "https://my-mac.tail1234.ts.net"
+    "publicUrl": "https://my-mac.tail1234.ts.net",
+    "tunnel": "ssh"
   }
 }
 ```
 
 - `port`: local port, default `7878`. If it is busy, `/remote start` fails with an error. It never picks another port.
 - `publicUrl`: the https address your tunnel serves. Optional.
+- `tunnel`: `"ssh"` opens a localhost.run tunnel on every `/remote start`. Optional. A non-empty `publicUrl` wins over it.
 
 The public URL put in the QR code is chosen in this order:
 
-1. `/remote start --url <url>`
+1. `/remote start --url <url>`, or `/remote start --tunnel ssh` (using both is an error)
 2. the `remote.publicUrl` setting
-3. this machine's Tailscale MagicDNS name, from `tailscale status --json`
-4. `http://127.0.0.1:<port>`, with a warning: only this machine can use it
+3. the `remote.tunnel` setting
+4. this machine's Tailscale MagicDNS name, from `tailscale status --json`
+5. `http://127.0.0.1:<port>`, with a warning: only this machine can use it
 
 Remote URLs must be `https`. Plain `http` is accepted only for localhost.
 
@@ -71,19 +74,33 @@ tailscale serve --bg 7878
 
 Use your port if you changed it. `/remote start` finds the MagicDNS name itself, for example `https://my-mac.tail1234.ts.net`. It cannot check that `tailscale serve` is running, so if the client cannot connect, run `tailscale serve status`.
 
+### localhost.run (no install, no account)
+
+```text
+/remote start --tunnel ssh
+```
+
+This runs the `ssh` that ships with macOS, Linux and Windows 10+, forwards a `https://<name>.lhr.life` address to the server, and stops it when remote turns off or Pi quits. The phone needs nothing installed.
+
+Limits:
+
+- localhost.run ends TLS, so it can read the traffic, including the access token. Use Tailscale for private work.
+- The address is new on every start and changes after a few hours. If `ssh` ends, remote turns off and tells you; run `/remote start` again and pair again. The extension does not restart the tunnel on its own, because the QR code would no longer match.
+- It is a free third-party service with no uptime promise.
+
 ### Cloudflare Tunnel
+
+Cloudflare Quick Tunnels do not support Server-Sent Events, which the event stream needs, so they do not work here. Use a named tunnel with `remote.publicUrl`.
 
 ```sh
 cloudflared tunnel --url http://127.0.0.1:7878
 ```
 
-Cloudflare prints an `https://...trycloudflare.com` address. Pass it explicitly:
+Pass the https address of your named tunnel explicitly, or set `remote.publicUrl`:
 
 ```text
-/remote start --url https://example-words.trycloudflare.com
+/remote start --url https://my-tunnel.example.com
 ```
-
-For a stable address, create a named tunnel and set `remote.publicUrl`.
 
 ## Pairing
 

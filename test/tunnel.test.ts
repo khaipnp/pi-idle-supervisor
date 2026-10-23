@@ -88,6 +88,26 @@ describe("--tunnel ssh (localhost.run)", () => {
 		expect(host.notifications.at(-1)!.message).toMatch(/off/);
 	});
 
+	test("localhost.run moving the tunnel to a new address turns remote off, ends ssh and says so", async () => {
+		fakeSsh("echo https://abc123.lhr.life; sleep 0.3; echo https://moved456.lhr.life; exec sleep 30");
+		host = await createHost();
+		await host.type("/remote start --tunnel ssh");
+		const pid = fakePid();
+		await expect.poll(() => host!.notifications.at(-1)!.message).toContain("moved it to https://moved456.lhr.life");
+		await expect.poll(() => alive(pid)).toBe(false);
+		await host.type("/remote status");
+		expect(host.notifications.at(-1)!.message).toMatch(/off/);
+	});
+
+	test("ssh repeating the same address keeps remote on", async () => {
+		fakeSsh("echo https://abc123.lhr.life; sleep 0.2; echo 'again https://abc123.lhr.life'; exec sleep 30");
+		host = await createHost();
+		await host.type("/remote start --tunnel ssh");
+		await new Promise((resolve) => setTimeout(resolve, 500));
+		await host.type("/remote status");
+		expect(host.notifications.at(-1)!.message).not.toMatch(/\boff\b/);
+	});
+
 	test("bad flag combinations are rejected before anything starts", async () => {
 		host = await createHost();
 		await host.type("/remote start --tunnel nope");

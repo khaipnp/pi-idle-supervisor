@@ -2,6 +2,8 @@ import { type ChildProcess, spawn } from "node:child_process";
 
 const URL_PATTERN = /https:\/\/[a-z0-9-]+\.lhr\.life/g;
 const OUTPUT_TAIL_CHARS = 400;
+// localhost.run follows the address with a QR code made of colour escape codes.
+const ANSI_PATTERN = /\x1b\[[0-9;]*m/g;
 
 /** A public https address that forwards to the local server, held open by a child process. */
 export interface Tunnel {
@@ -42,8 +44,7 @@ export function startSshTunnel(options: { port: number; timeoutMs?: number }): P
 		let settled = false;
 		let stopped = false;
 
-		const tail = () => output.trim().slice(-OUTPUT_TAIL_CHARS) || "no output";
-		const urls = () => output.match(URL_PATTERN) ?? [];
+		const tail = () => output.replace(ANSI_PATTERN, "").trim().slice(-OUTPUT_TAIL_CHARS) || "no output";
 		const fail = (message: string) => {
 			if (settled) return;
 			settled = true;
@@ -66,14 +67,17 @@ export function startSshTunnel(options: { port: number; timeoutMs?: number }): P
 			tunnel.onClose?.(reason);
 		};
 		const onData = (chunk: Buffer) => {
+			// Look for addresses before trimming: one chunk can hold the address followed by a long QR code.
+			const combined = output + chunk.toString();
+			const urls = combined.match(URL_PATTERN) ?? [];
 			// Only the tail is kept: enough for an address split across chunks, and for the error message.
-			output = (output + chunk.toString()).slice(-OUTPUT_TAIL_CHARS * 4);
+			output = combined.slice(-OUTPUT_TAIL_CHARS * 4);
 			if (settled) {
-				const moved = urls().find((url) => url !== tunnel.url);
+				const moved = urls.find((url) => url !== tunnel.url);
 				if (moved) close(`localhost.run moved it to ${moved}`);
 				return;
 			}
-			const url = urls()[0];
+			const url = urls[0];
 			if (!url) return;
 			settled = true;
 			clearTimeout(timer);

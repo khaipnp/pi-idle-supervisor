@@ -48,6 +48,16 @@ describe("--tunnel ssh (localhost.run)", () => {
 		await expect.poll(() => alive(pid)).toBe(false);
 	});
 
+	test("finds the URL when a long QR code follows it in the same chunk", async () => {
+		// One file, one write: the address and the QR code arrive together, as localhost.run sends them.
+		const banner = `x.lhr.life tunneled, https://qr123.lhr.life\n${"\x1b[7m  \x1b[0m".repeat(2000)}\n`;
+		writeFileSync(join(dir, "banner"), banner);
+		fakeSsh(`cat "${dir}/banner"; exec sleep 30`);
+		host = await createHost();
+		await host.type("/remote start --tunnel ssh");
+		expect(host.notifications.at(-1)!.message).toContain("qr123.lhr.life");
+	});
+
 	test("the remote.tunnel setting works, but an explicit publicUrl setting beats it", async () => {
 		fakeSsh("echo https://fromsetting.lhr.life; exec sleep 30");
 		host = await createHost({ remote: { tunnel: "ssh", publicUrl: "" } });

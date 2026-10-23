@@ -237,7 +237,7 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 				const pairing = pairingString(publicUrl.url, started.token);
 				let warning = "";
 				if (publicUrl.localOnly) {
-					warning = "\nWarning: no tunnel URL found, so only this machine can connect. Use --tunnel ssh, --url, the publicUrl setting, or Tailscale.";
+					warning = "\nWarning: no tunnel URL found, so only this machine can connect. Use --tunnel ssh, --url, the publicUrl setting, or turn Tailscale on (it must be running to be detected).";
 				} else if (publicUrl.viaSsh) {
 					warning = "\nNote: localhost.run relays this traffic and can read it, and the address changes after a few hours. For private work use Tailscale.";
 				} else if (publicUrl.viaTailscale) {

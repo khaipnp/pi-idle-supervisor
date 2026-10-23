@@ -73,7 +73,7 @@ Install Tailscale on the computer and the phone and sign both in to the same tai
 tailscale serve --bg 7878
 ```
 
-Use your port if you changed it. `/remote start` finds the MagicDNS name itself, for example `https://my-mac.tail1234.ts.net`. It cannot check that `tailscale serve` is running, so if the client cannot connect, run `tailscale serve status`.
+Use your port if you changed it. `/remote start` finds the MagicDNS name itself, for example `https://my-mac.tail1234.ts.net`. It looks for `tailscale` on PATH, then for the command line tool inside the macOS app, and it only uses the name while Tailscale is running. If Tailscale is stopped, remote falls back to the localhost address, which a phone cannot reach. It cannot check that `tailscale serve` is running, so if the client cannot connect, run `tailscale serve status`.
 
 ### localhost.run (no install, no account)
 

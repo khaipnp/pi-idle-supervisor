@@ -1,6 +1,6 @@
 import { createServer } from "node:net";
 import { afterEach, describe, expect, test } from "vitest";
-import { resolvePublicUrl } from "../src/pairing.ts";
+import { magicDnsUrl, resolvePublicUrl } from "../src/pairing.ts";
 import { createHost, type Host, openEvents } from "./harness.ts";
 
 let host: Host | undefined;
@@ -27,6 +27,22 @@ describe("public URL resolution", () => {
 		expect(await resolvePublicUrl({ port: 1, flag: "http://127.0.0.1:9", tailscale: none })).toMatchObject({ localOnly: true });
 		expect(await resolvePublicUrl({ port: 5, setting: "", tailscale: none })).toMatchObject({ url: "http://127.0.0.1:5" });
 		await expect(resolvePublicUrl({ port: 1, flag: "nonsense", tailscale: none })).rejects.toThrow();
+	});
+});
+
+describe("Tailscale status", () => {
+	const status = (BackendState: string, DNSName = "mac.tail1234.ts.net.") => JSON.stringify({ BackendState, Self: { DNSName } });
+
+	test("uses the MagicDNS name only while Tailscale is running", () => {
+		expect(magicDnsUrl(status("Running"))).toBe("https://mac.tail1234.ts.net");
+		expect(magicDnsUrl(status("Stopped"))).toBeUndefined();
+		expect(magicDnsUrl(status("NeedsLogin"))).toBeUndefined();
+	});
+
+	test("missing name or unreadable output gives no address", () => {
+		expect(magicDnsUrl(status("Running", ""))).toBeUndefined();
+		expect(magicDnsUrl(JSON.stringify({ BackendState: "Running" }))).toBeUndefined();
+		expect(magicDnsUrl("not json")).toBeUndefined();
 	});
 });
 

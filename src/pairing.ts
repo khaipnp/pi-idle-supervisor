@@ -12,35 +12,54 @@ export interface PublicUrl {
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const TAILSCALE_TIMEOUT_MS = 3000;
 const TAILSCALE_MAX_OUTPUT = 4_000_000;
+/** `tailscale` on PATH, then the command line tool inside the macOS app, which does not put it on PATH. */
+const TAILSCALE_COMMANDS = ["tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"];
 
 export function clientsLabel(count: number): string {
 	return `${count} ${count === 1 ? "client" : "clients"}`;
 }
 
-/** The access token travels in this URL's requests, so only https (or loopback http) is accepted. Returns it without a trailing slash. */
-function normaliseUrl(value: string): string | undefined {
+/** The access token travels in this URL's requests, so only https (or loopback http) is accepted. */
+function normaliseUrl(value: string): { url: string; localOnly: boolean } | undefined {
 	try {
 		const parsed = new URL(value);
-		const ok = parsed.protocol === "https:" || (parsed.protocol === "http:" && LOOPBACK.has(parsed.hostname));
-		return ok ? parsed.href.replace(/\/+$/, "") : undefined;
+		const localOnly = LOOPBACK.has(parsed.hostname);
+		const ok = parsed.protocol === "https:" || (parsed.protocol === "http:" && localOnly);
+		return ok ? { url: parsed.href.replace(/\/+$/, ""), localOnly } : undefined;
 	} catch {
 		return undefined;
 	}
 }
 
-/** MagicDNS name of this machine from `tailscale status --json`, or undefined when unavailable. */
-export function probeTailscale(): Promise<string | undefined> {
+/**
+ * The https address for this machine's MagicDNS name, from `tailscale status --json` output.
+ * Undefined unless Tailscale is running: a stopped node still reports its name, but nothing can reach it.
+ */
+export function magicDnsUrl(statusJson: string): string | undefined {
+	try {
+		const status = JSON.parse(statusJson) as { BackendState?: string; Self?: { DNSName?: string } };
+		const dns = status.Self?.DNSName?.replace(/\.$/, "");
+		return status.BackendState === "Running" && dns ? `https://${dns}` : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function tailscaleStatus(command: string): Promise<string | undefined> {
 	return new Promise((resolve) => {
-		execFile("tailscale", ["status", "--json"], { timeout: TAILSCALE_TIMEOUT_MS, maxBuffer: TAILSCALE_MAX_OUTPUT }, (error, stdout) => {
-			if (error) return resolve(undefined);
-			try {
-				const dns = (JSON.parse(stdout) as { Self?: { DNSName?: string } }).Self?.DNSName?.replace(/\.$/, "");
-				resolve(dns ? `https://${dns}` : undefined);
-			} catch {
-				resolve(undefined);
-			}
-		});
+		execFile(command, ["status", "--json"], { timeout: TAILSCALE_TIMEOUT_MS, maxBuffer: TAILSCALE_MAX_OUTPUT }, (error, stdout) =>
+			resolve(error ? undefined : stdout),
+		);
 	});
+}
+
+/** MagicDNS address of this machine, or undefined when Tailscale is missing or not running. */
+async function probeTailscale(): Promise<string | undefined> {
+	for (const command of TAILSCALE_COMMANDS) {
+		const output = await tailscaleStatus(command);
+		if (output !== undefined) return magicDnsUrl(output);
+	}
+	return undefined;
 }
 
 /** `--url` flag, then `publicUrl` setting, then Tailscale MagicDNS, then the localhost address. */
@@ -52,9 +71,9 @@ export async function resolvePublicUrl(sources: {
 }): Promise<PublicUrl> {
 	const explicit = sources.flag ?? (sources.setting || undefined);
 	if (explicit !== undefined) {
-		const url = normaliseUrl(explicit);
-		if (!url) throw new Error(`"${explicit}" is not an https URL (http is allowed only for localhost)`);
-		return { url, localOnly: LOOPBACK.has(new URL(url).hostname) };
+		const normalised = normaliseUrl(explicit);
+		if (!normalised) throw new Error(`"${explicit}" is not an https URL (http is allowed only for localhost)`);
+		return normalised;
 	}
 	const magic = await (sources.tailscale ?? probeTailscale)();
 	if (magic) return { url: magic, localOnly: false, viaTailscale: true };

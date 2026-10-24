@@ -30,7 +30,7 @@ describe("remote on/off", () => {
 		const body = await res.json();
 		assertSchema("Snapshot", body);
 		expect(body).toMatchObject({
-			protocolVersion: "1.3",
+			protocolVersion: "1.4",
 			hostSession: { id: host.session.sessionManager.getSessionId(), cwd: host.session.sessionManager.getCwd() },
 			status: "settled",
 			messages: [],
@@ -83,7 +83,7 @@ describe("request checks", () => {
 		for (const protocol of [undefined, "2.0", "0.9"]) {
 			const headers = { ...clientHeaders(token), "Pi-Remote-Protocol": protocol };
 			const error = await expectError(await remoteGet(url, "/v1/snapshot", headers), 426, "protocol_mismatch");
-			expect(error.serverVersion).toBe("1.3");
+			expect(error.serverVersion).toBe("1.4");
 		}
 		// A newer minor version is still compatible.
 		expect((await remoteGet(url, "/v1/snapshot", { ...clientHeaders(token), "Pi-Remote-Protocol": "1.7" })).status).toBe(200);

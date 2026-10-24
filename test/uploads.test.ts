@@ -68,6 +68,30 @@ describe("uploads", () => {
 		stream.close();
 	});
 
+	test("an image in the conversation can be fetched by message and position", async () => {
+		host = await createHost();
+		host.faux.setResponses([fauxAssistantMessage(fauxText("seen"))]);
+		const { url, token } = await host.startRemote();
+		const stream = await openEvents(url, token);
+
+		const file = await (await upload(url, token, "shot.png", "image/png", PNG_1X1)).json();
+		expect((await remotePost(url, "/v1/prompt", token, { text: "look", attachments: [file.id] })).status).toBe(202);
+		await stream.waitForType("settled");
+
+		const snapshot = await (await fetch(`${url}/v1/snapshot`, { headers: clientHeaders(token) })).json();
+		const user = snapshot.messages.find((m: { role: string }) => m.role === "user");
+		const res = await fetch(`${url}/v1/messages/${user.id}/images/0`, { headers: clientHeaders(token) });
+		expect(res.status).toBe(200);
+		expect(res.headers.get("content-type")).toBe("image/png");
+		expect(Buffer.from(await res.arrayBuffer())).toEqual(PNG_1X1);
+
+		await expectError(await fetch(`${url}/v1/messages/${user.id}/images/1`, { headers: clientHeaders(token) }), 404, "not_found");
+		await expectError(await fetch(`${url}/v1/messages/m-99/images/0`, { headers: clientHeaders(token) }), 404, "not_found");
+		await expectError(await fetch(`${url}/v1/messages/nonsense/images/0`, { headers: clientHeaders(token) }), 404, "not_found");
+		expect((await fetch(`${url}/v1/messages/${user.id}/images/0`)).status).toBe(401);
+		stream.close();
+	});
+
 	test("bad uploads and bad attachment lists are refused", async () => {
 		host = await createHost();
 		const { url, token } = await host.startRemote();

@@ -151,6 +151,10 @@ A follow-up sent from a remote client while the agent is working waits in the ex
 
 This is protocol 1.3. Older clients keep working; their follow-ups just wait in the same queue. Details are in `docs/protocol.md`.
 
+## Images in the conversation
+
+Since protocol 1.4 a remote client can fetch the images in the conversation, such as a photo sent from the phone or an image a tool read, with `GET /v1/messages/{id}/images/{n}`, so it can show them rather than a placeholder. Snapshots and events still carry no image bytes.
+
 ## Pairing
 
 Scan the QR code with the client, or paste the pairing string. The string looks like `pi-remote://pair?url=<public url>&token=<access token>&v=1`.

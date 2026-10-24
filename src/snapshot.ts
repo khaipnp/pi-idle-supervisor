@@ -87,6 +87,21 @@ export function toMessage(m: PiMessage, id: string): Message | undefined {
 	return undefined;
 }
 
+/**
+ * The `index`-th image (counting image blocks only) of the message `id` on the active branch, for
+ * GET /v1/messages/{id}/images/{n}; undefined when there is no such message or image.
+ */
+export function imageOf(branch: SessionEntry[], id: string, index: number): ImageContent | undefined {
+	const position = Number(id.match(/^m-(\d+)$/)?.[1] ?? Number.NaN);
+	if (!Number.isSafeInteger(position)) return undefined;
+	const message = branch.filter((e) => e.type === "message" && PROTOCOL_ROLES.has(e.message.role))[position];
+	if (message?.type !== "message") return undefined;
+	const content: unknown = "content" in message.message ? message.message.content : undefined;
+	if (!Array.isArray(content)) return undefined;
+	// SAFETY: user, assistant and toolResult content arrays hold Pi content parts.
+	return (content as PiContent[]).filter((p): p is ImageContent => p.type === "image")[index];
+}
+
 /** Message ids are the message's position in the active branch, so live events and snapshots agree. */
 const messageId = (position: number) => `m-${position}`;
 

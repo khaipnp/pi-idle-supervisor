@@ -5,7 +5,7 @@ import { clientsLabel, lanAddress, pairingString, probeTailscale, type PublicUrl
 import { wrapNotify } from "./notices.ts";
 import { FollowUpQueue } from "./queue.ts";
 import { type CommandInfo, type DeliverAs, type PromptResult, RemoteServer } from "./server.ts";
-import { hostSessionOf, nextMessageId, toMessage, toSnapshot, toolUpdateText } from "./snapshot.ts";
+import { hostSessionOf, imageOf, nextMessageId, toMessage, toSnapshot, toolUpdateText } from "./snapshot.ts";
 import { startSshTunnel, type Tunnel } from "./tunnel.ts";
 import { type Attachment, userContent } from "./uploads.ts";
 
@@ -100,7 +100,7 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 		// A previous runtime left the server running (/new, /resume, /fork, reload): take it over.
 		clearTimeout(state.replacementTimer);
 		if (state.server) {
-			state.server.rebind({ snapshot, prompt, steerQueued, cancelQueued, commands, abort: () => ctx?.abort(), onClients: refreshFooter });
+			state.server.rebind({ snapshot, prompt, steerQueued, cancelQueued, image, commands, abort: () => ctx?.abort(), onClients: refreshFooter });
 			refreshFooter();
 			if (state.tunnel) {
 				state.tunnel.onClose = onTunnelClose;
@@ -229,6 +229,11 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 		return followUps.take(id) !== undefined;
 	}
 
+	function image(id: string, index: number) {
+		const found = imageOf(ctx!.sessionManager.getBranch(), id, index);
+		return found && { mimeType: found.mimeType, data: Buffer.from(found.data, "base64") };
+	}
+
 	/** What a remote client may send as `/name`: everything Pi lists except /remote, which is terminal-only. */
 	function commands(): CommandInfo[] {
 		return pi
@@ -270,6 +275,7 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 				prompt,
 				steerQueued,
 				cancelQueued,
+				image,
 				commands,
 				abort: () => ctx?.abort(),
 				answerDialog: (id, body) => state.dialogs?.answer(id, body) ?? "unknown",

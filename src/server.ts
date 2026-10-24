@@ -6,7 +6,7 @@ import type { DialogAnswerResult } from "./dialogs.ts";
 import type { Snapshot } from "./snapshot.ts";
 import { type Attachment, MAX_ATTACHMENTS, MAX_UPLOAD_BYTES, Uploads } from "./uploads.ts";
 
-export const PROTOCOL_VERSION = "1.3";
+export const PROTOCOL_VERSION = "1.4";
 export const PROTOCOL_MAJOR = PROTOCOL_VERSION.split(".")[0];
 
 const MAX_FAILURES = 10;
@@ -52,6 +52,8 @@ export interface RemoteServerOptions {
 	steerQueued: (id: string) => boolean;
 	/** Drops the queued follow-up `id`; false when it is not waiting. */
 	cancelQueued: (id: string) => boolean;
+	/** The `index`-th image of message `id`, for GET /v1/messages/{id}/images/{n}; undefined when there is none. */
+	image: (id: string, index: number) => { mimeType: string; data: Buffer } | undefined;
 	/** The slash commands a client may send, for GET /v1/commands. */
 	commands: () => CommandInfo[];
 	/** Stops the current run; no-op when settled. */
@@ -79,7 +81,7 @@ export class RemoteServer {
 	) {}
 
 	/** Points the server at a new host session's runtime (ADR-0003); token, port and event log are kept. */
-	rebind(host: Pick<RemoteServerOptions, "snapshot" | "prompt" | "steerQueued" | "cancelQueued" | "commands" | "abort" | "onClients">): void {
+	rebind(host: Pick<RemoteServerOptions, "snapshot" | "prompt" | "steerQueued" | "cancelQueued" | "image" | "commands" | "abort" | "onClients">): void {
 		this.options = { ...this.options, ...host };
 		this.detached = false;
 	}
@@ -175,6 +177,25 @@ export class RemoteServer {
 			} catch {
 				return sendFailure(res);
 			}
+		}
+		const imageRoute = path.match(/^\/v1\/messages\/([^/]+)\/images\/(\d{1,4})$/);
+		if (req.method === "GET" && imageRoute) {
+			let image: { mimeType: string; data: Buffer } | undefined;
+			try {
+				image = this.options.image(decodeId(imageRoute[1]), Number(imageRoute[2]));
+			} catch {
+				return sendFailure(res);
+			}
+			if (!image) return sendError(res, 404, "not_found", "No such image on the active branch");
+			res.writeHead(200, {
+				// The type comes from the session file; anything odd is served as plain bytes.
+				"Content-Type": /^image\/[\w.+-]+$/.test(image.mimeType) ? image.mimeType : "application/octet-stream",
+				"Content-Length": image.data.length,
+				// The id is a position on the branch, which /tree can point at another message.
+				"Cache-Control": "private, no-cache",
+				"X-Content-Type-Options": "nosniff",
+			});
+			return void res.end(image.data);
 		}
 		if (req.method === "POST" && path === "/v1/files") {
 			return void this.handleUpload(req, res).catch(() => sendFailure(res));

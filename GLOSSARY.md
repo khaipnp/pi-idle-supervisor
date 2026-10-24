@@ -34,6 +34,10 @@ _Avoid_: password, API key, pairing code
 A message from a person to the agent, typed in the terminal or sent by a remote client.
 _Avoid_: input, command, ui prompt
 
+**Slash command**:
+A line starting with `/name` that runs an extension's command instead of reaching the agent, typed in the terminal or sent by a remote client in place of a prompt.
+_Avoid_: command (alone), action
+
 **Steer**:
 A prompt sent while the agent is working, delivered after its current turn.
 _Avoid_: interrupt

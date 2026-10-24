@@ -5,6 +5,7 @@ import {
 	type AgentSession,
 	type AgentSessionRuntime,
 	type CreateAgentSessionRuntimeFactory,
+	type ExtensionFactory,
 	createAgentSessionFromServices,
 	createAgentSessionRuntime,
 	createAgentSessionServices,
@@ -14,7 +15,7 @@ import {
 	SettingsManager,
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { type FauxProviderHandle, fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, type FauxProviderHandle, fauxProvider, fauxToolCall, InMemoryCredentialStore, Type } from "@earendil-works/pi-ai";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import schema from "../schema/protocol.schema.json" with { type: "json" };
 import extension from "../src/extension.ts";
@@ -61,7 +62,9 @@ export interface Host {
 	dispose(): Promise<void>;
 }
 
-export async function createHost(options: { tools?: ToolDefinition[]; remote?: { port?: number; publicUrl?: string; tunnel?: string } } = {}): Promise<Host> {
+export async function createHost(
+	options: { tools?: ToolDefinition[]; extensions?: ExtensionFactory[]; remote?: { port?: number; publicUrl?: string; tunnel?: string } } = {},
+): Promise<Host> {
 	// Remote state is process-global (ADR-0003); start every host from a clean slate.
 	delete (globalThis as { [key: symbol]: unknown })[Symbol.for("pi-idle-supervisor.remote")];
 	const cwd = mkdtempSync(join(tmpdir(), "pi-remote-test-"));
@@ -85,7 +88,7 @@ export async function createHost(options: { tools?: ToolDefinition[]; remote?: {
 				noPromptTemplates: true,
 				noThemes: true,
 				noContextFiles: true,
-				extensionFactories: [extension],
+				extensionFactories: [extension, ...(options.extensions ?? [])],
 			},
 		});
 		return {
@@ -257,3 +260,23 @@ export function remotePost(url: string, path: string, token: string, body?: unkn
 	const raw = typeof body === "string" ? body : JSON.stringify(body ?? {});
 	return fetch(url + path, { method: "POST", headers: { ...clientHeaders(token), "Content-Type": "application/json" }, body: raw });
 }
+
+/** A tool named "gate" that runs until the test releases it or the run is aborted; `callGate()` makes the model call it. */
+export function gatedTool() {
+	let release: () => void = () => {};
+	const tool: ToolDefinition = {
+		name: "gate",
+		label: "Gate",
+		description: "Blocks until released",
+		parameters: Type.Object({}),
+		execute: (_id, _params, signal) =>
+			new Promise((resolve) => {
+				const done = () => resolve({ content: [{ type: "text", text: "released" }], details: {} });
+				release = done;
+				signal?.addEventListener("abort", done);
+			}),
+	};
+	return { tool, release: () => release() };
+}
+
+export const callGate = () => fauxAssistantMessage(fauxToolCall("gate", {}, { id: "g" }), { stopReason: "toolUse" });

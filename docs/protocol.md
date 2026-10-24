@@ -2,7 +2,7 @@
 
 The contract between a **host session** (the `pi-idle-supervisor` extension) and a **remote client** (for example the Android app, in its own repo). Terms follow `GLOSSARY.md`.
 
-Protocol version: **1.1**. A change that breaks existing clients bumps the major version. Adding a field, event type, or endpoint bumps the minor version, and clients must ignore fields and event types they don't know.
+Protocol version: **1.2**. A change that breaks existing clients bumps the major version. Adding a field, event type, or endpoint bumps the minor version, and clients must ignore fields and event types they don't know.
 
 ## Transport
 
@@ -31,7 +31,7 @@ Clients send these headers:
 
 ```
 Authorization: Bearer <access token>
-Pi-Remote-Protocol: 1.1
+Pi-Remote-Protocol: 1.2
 ```
 
 The server checks them in this order:
@@ -56,7 +56,7 @@ Returns the whole current conversation of the host session, together with the ev
 
 ```json
 {
-  "protocolVersion": "1.1",
+  "protocolVersion": "1.2",
   "seq": 1042,
   "hostSession": { "id": "…", "cwd": "/Users/me/project", "name": "optional" },
   "status": "working",
@@ -118,6 +118,7 @@ Sends a prompt.
 - `deliverAs` is optional and is either `"steer"` or `"followUp"`.
 - If the host session is settled, the prompt starts a run, and the server ignores `deliverAs`.
 - If the host session is working and `deliverAs` is missing, the server responds `409 busy`.
+- Slash commands (added in 1.2): `text` is handled like a line typed on the host terminal. `/name args` naming an extension command runs that command at once, even while working, and adds no user message. Prompt templates and `/skill:name` expand before the prompt is sent, and follow the `deliverAs` rules above. Text starting with `/` that names nothing reaches the model unchanged. Pi's built-in terminal commands (`/model`, `/compact`, ...) are not available. `/remote` gets `400 bad_request`: it can only be run on the host terminal, since stopping remote would cut off the client. A command with `attachments` also gets `400 bad_request`, because commands take only text. This applies whatever version the client sends, so a 1.0 or 1.1 client whose text starts with a command name now runs that command.
 - A body that is not JSON, is over 1 MB, has neither non-empty `text` nor `attachments`, has a non-string `text`, malformed `attachments`, or has another `deliverAs` gets `400 bad_request`.
 - On success the server responds `202 {}`. The prompt then appears in the event stream like any other message; images appear as image blocks without bytes.
 

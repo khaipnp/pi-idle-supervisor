@@ -2,11 +2,12 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { renderUnicodeCompact } from "uqr";
 import { Dialogs, wrapDialogs } from "./dialogs.ts";
 import { clientsLabel, lanAddress, pairingString, probeTailscale, type PublicUrl, resolvePublicUrl } from "./pairing.ts";
-import { RemoteServer } from "./server.ts";
+import { type DeliverAs, type PromptResult, RemoteServer } from "./server.ts";
 import { hostSessionOf, nextMessageId, toMessage, toSnapshot, toolUpdateText } from "./snapshot.ts";
 import { startSshTunnel, type Tunnel } from "./tunnel.ts";
 
 const DEFAULT_PORT = 7878;
+const REMOTE_COMMAND = "remote";
 /** How long the server waits for a replacement session before giving up and turning remote off. */
 export const REPLACEMENT_TIMEOUT_MS = 30_000;
 
@@ -167,12 +168,27 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 		return toSnapshot(ctx!.sessionManager, working ? "working" : "settled", seq, state.dialogs?.list() ?? []);
 	}
 
-	function prompt(content: Parameters<typeof pi.sendUserMessage>[0], deliverAs: "steer" | "followUp" | undefined): boolean {
+	/**
+	 * Handles remote text like the terminal does: `/name args` runs an extension command (at once,
+	 * even while working), and prompt templates and `/skill:` commands expand. Anything else is a prompt.
+	 */
+	function prompt(content: Parameters<typeof pi.sendUserMessage>[0], deliverAs: DeliverAs | undefined): PromptResult {
+		const text = typeof content === "string" ? content : content.find((part) => part.type === "text")?.text ?? "";
+		// Pi takes the name up to the first space, so match that exactly.
+		const name = text.startsWith("/") ? text.slice(1).split(" ", 1)[0] : undefined;
+		// Stopping or restarting remote from the phone would cut off the phone itself. Pi renames colliding
+		// commands to `remote:1`, `remote:2`, so block those too rather than guess which one is ours.
+		if (name === REMOTE_COMMAND || name?.startsWith(`${REMOTE_COMMAND}:`)) {
+			return { rejected: `/${REMOTE_COMMAND} can only be run on the host terminal` };
+		}
+		const isExtensionCommand = name !== undefined && pi.getCommands().some((c) => c.source === "extension" && c.name === name);
+		// Pi passes a command only the text, so attachments would be dropped or end up in its arguments.
+		if (isExtensionCommand && typeof content !== "string") return { rejected: "A slash command cannot have attachments" };
 		// Same state as the snapshot: settled starts a run and ignores deliverAs.
-		if (!working) pi.sendUserMessage(content);
-		else if (deliverAs) pi.sendUserMessage(content, { deliverAs });
-		else return false;
-		return true;
+		if (!working || isExtensionCommand) pi.sendUserMessage(content, { expandPromptTemplates: true });
+		else if (deliverAs) pi.sendUserMessage(content, { deliverAs, expandPromptTemplates: true });
+		else return "busy";
+		return "sent";
 	}
 
 	/** Ways a phone can reach the server, as offered by `/remote` with no arguments. */
@@ -260,7 +276,7 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 		c.ui.notify(`Remote is on at ${publicUrl.url}${warning}\n${renderUnicodeCompact(pairing)}\nPair with: ${pairing}`, "info");
 	}
 
-	pi.registerCommand("remote", {
+	pi.registerCommand(REMOTE_COMMAND, {
 		description: "Remote control: /remote (pick how to connect) | start [--lan | --tailscale | --tunnel ssh | --url <https url>] | stop | status",
 		getArgumentCompletions: (prefix) =>
 			["start", "stop", "status"].filter((s) => s.startsWith(prefix)).map((s) => ({ value: s, label: s })),

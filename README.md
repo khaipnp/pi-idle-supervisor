@@ -128,7 +128,16 @@ A remote client can upload files and attach up to 4 of them to one prompt.
 - Limits: 12 MB per file and 200 MB in total while remote is on.
 - Uploads live in a private temporary folder and are deleted when remote turns off or Pi quits.
 
-This is protocol 1.1. Clients written for 1.0 keep working. Details are in `docs/protocol.md`.
+## Slash commands from the phone
+
+A prompt sent from a remote client is handled like a line typed on the terminal:
+
+- `/name args` runs an extension command right away, even while the agent is working.
+- Prompt templates and `/skill:name` expand as usual.
+- Pi's built-in commands (`/model`, `/compact`, ...) only work on the terminal, and so does `/remote`.
+- A command can't carry attachments.
+
+This is protocol 1.2. Clients written for 1.0 or 1.1 keep working, but text they send that starts with a command name now runs the command. Details are in `docs/protocol.md`.
 
 ## Pairing
 

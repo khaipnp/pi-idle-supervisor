@@ -7,7 +7,7 @@ import type { Snapshot } from "./snapshot.ts";
 import { MAX_ATTACHMENTS, MAX_UPLOAD_BYTES, Uploads, userContent } from "./uploads.ts";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 
-export const PROTOCOL_VERSION = "1.1";
+export const PROTOCOL_VERSION = "1.2";
 export const PROTOCOL_MAJOR = PROTOCOL_VERSION.split(".")[0];
 
 const MAX_FAILURES = 10;
@@ -26,14 +26,19 @@ type ErrorCode =
 	| "not_found"
 	| "storage_full";
 
+export type DeliverAs = "steer" | "followUp";
+
+/** "busy": the host session is working and `deliverAs` is missing. `rejected`: why the request is refused (400). */
+export type PromptResult = "sent" | "busy" | { rejected: string };
+
 export interface RemoteServerOptions {
 	/** Address to listen on: 127.0.0.1 behind a tunnel, or this machine's private LAN address. Default 127.0.0.1. */
 	host?: string;
 	port: number;
 	/** Builds the body of GET /v1/snapshot for an authorised request; `seq` is the last event so far. */
 	snapshot: (seq: number) => Snapshot;
-	/** Sends a prompt. Returns false when the host session is working and `deliverAs` is missing. */
-	prompt: (content: string | (TextContent | ImageContent)[], deliverAs: "steer" | "followUp" | undefined) => boolean;
+	/** Handles the text of POST /v1/prompt like a line typed on the terminal (a prompt or a slash command). */
+	prompt: (content: string | (TextContent | ImageContent)[], deliverAs: DeliverAs | undefined) => PromptResult;
 	/** Stops the current run; no-op when settled. */
 	abort: () => void;
 	/** Applies a remote answer to a pending dialog. */
@@ -211,9 +216,9 @@ export class RemoteServer {
 		}
 		const files = this.uploads.find(ids as string[]);
 		if (!files) return sendError(res, 404, "not_found", "An attachment id is unknown");
-		if (!this.options.prompt(userContent((text as string | undefined) ?? "", files), deliverAs)) {
-			return sendError(res, 409, "busy", "The host session is working; set deliverAs to steer or followUp");
-		}
+		const result = this.options.prompt(userContent((text as string | undefined) ?? "", files), deliverAs);
+		if (result === "busy") return sendError(res, 409, "busy", "The host session is working; set deliverAs to steer or followUp");
+		if (typeof result === "object") return sendError(res, 400, "bad_request", result.rejected);
 		sendJson(res, 202, {});
 	}
 

@@ -1,7 +1,7 @@
 import { fauxAssistantMessage, fauxText, fauxThinking, fauxToolCall, Type } from "@earendil-works/pi-ai";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { assertSchema, clientHeaders, createHost, type Host, openEvents, remoteGet, remotePost } from "./harness.ts";
+import { assertSchema, callGate, clientHeaders, createHost, gatedTool, type Host, openEvents, remoteGet, remotePost } from "./harness.ts";
 
 async function expectError(res: Response, status: number, code: string): Promise<Record<string, unknown>> {
 	expect(res.status).toBe(status);
@@ -30,7 +30,7 @@ describe("remote on/off", () => {
 		const body = await res.json();
 		assertSchema("Snapshot", body);
 		expect(body).toMatchObject({
-			protocolVersion: "1.1",
+			protocolVersion: "1.2",
 			hostSession: { id: host.session.sessionManager.getSessionId(), cwd: host.session.sessionManager.getCwd() },
 			status: "settled",
 			messages: [],
@@ -82,7 +82,7 @@ describe("request checks", () => {
 		for (const protocol of [undefined, "2.0", "0.9"]) {
 			const headers = { ...clientHeaders(token), "Pi-Remote-Protocol": protocol };
 			const error = await expectError(await remoteGet(url, "/v1/snapshot", headers), 426, "protocol_mismatch");
-			expect(error.serverVersion).toBe("1.1");
+			expect(error.serverVersion).toBe("1.2");
 		}
 		// A newer minor version is still compatible.
 		expect((await remoteGet(url, "/v1/snapshot", { ...clientHeaders(token), "Pi-Remote-Protocol": "1.7" })).status).toBe(200);
@@ -332,24 +332,6 @@ describe("event stream", () => {
 });
 
 describe("prompt and abort", () => {
-	/** A tool that runs until the test releases it or the run is aborted. */
-	function gatedTool() {
-		let release: () => void = () => {};
-		const tool: ToolDefinition = {
-			name: "gate",
-			label: "Gate",
-			description: "Blocks until released",
-			parameters: Type.Object({}),
-			execute: (_id, _params, signal) =>
-				new Promise((resolve) => {
-					const done = () => resolve({ content: [{ type: "text", text: "released" }], details: {} });
-					release = done;
-					signal?.addEventListener("abort", done);
-				}),
-		};
-		return { tool, release: () => release() };
-	}
-	const callGate = () => fauxAssistantMessage(fauxToolCall("gate", {}, { id: "g" }), { stopReason: "toolUse" });
 	const userTexts = (snapshot: { messages: Array<{ role: string; content: Array<{ text?: string }> }> }) =>
 		snapshot.messages.filter((m) => m.role === "user").map((m) => m.content[0].text);
 	const snapshotOf = async (url: string, token: string) => (await remoteGet(url, "/v1/snapshot", clientHeaders(token))).json();

@@ -2,7 +2,7 @@
 
 The contract between a **host session** (the `pi-idle-supervisor` extension) and a **remote client** (for example the Android app, in its own repo). Terms follow `GLOSSARY.md`.
 
-Protocol version: **1.2**. A change that breaks existing clients bumps the major version. Adding a field, event type, or endpoint bumps the minor version, and clients must ignore fields and event types they don't know.
+Protocol version: **1.3**. A change that breaks existing clients bumps the major version. Adding a field, event type, or endpoint bumps the minor version, and clients must ignore fields and event types they don't know.
 
 ## Transport
 
@@ -31,7 +31,7 @@ Clients send these headers:
 
 ```
 Authorization: Bearer <access token>
-Pi-Remote-Protocol: 1.2
+Pi-Remote-Protocol: 1.3
 ```
 
 The server checks them in this order:
@@ -56,16 +56,17 @@ Returns the whole current conversation of the host session, together with the ev
 
 ```json
 {
-  "protocolVersion": "1.2",
+  "protocolVersion": "1.3",
   "seq": 1042,
   "hostSession": { "id": "…", "cwd": "/Users/me/project", "name": "optional" },
   "status": "working",
   "messages": [ /* Message, oldest first */ ],
-  "dialogs": [ /* Dialog, every dialog still waiting for an answer */ ]
+  "dialogs": [ /* Dialog, every dialog still waiting for an answer */ ],
+  "queue": [ /* FollowUp, remote follow-ups waiting for the run to settle, oldest first */ ]
 }
 ```
 
-`status` is either `"working"` or `"settled"`.
+`status` is either `"working"` or `"settled"`. `queue` was added in 1.3.
 
 To connect, a client fetches the snapshot, then opens the event stream with `Last-Event-ID: <seq>`.
 
@@ -131,6 +132,7 @@ Sends a prompt.
 - `deliverAs` is optional and is either `"steer"` or `"followUp"`.
 - If the host session is settled, the prompt starts a run, and the server ignores `deliverAs`. If a run started on the host at the same moment, the prompt is queued as a follow-up instead.
 - If the host session is working and `deliverAs` is missing, the server responds `409 busy`.
+- Follow-up queue (added in 1.3): while the host session is working, a `"followUp"` prompt waits in the follow-up queue instead of reaching Pi. It shows up in the snapshot's `queue` and in a `queue` event. When the run settles, the oldest waiting follow-up starts the next run, so they are sent one run at a time, oldest first. Until then a client can deliver it at once with `POST /v1/queue/{id}/steer` or drop it with `DELETE /v1/queue/{id}`. When a run is aborted, from a client or the terminal, every waiting follow-up is dropped. A replaced host session starts with an empty queue. Follow-ups typed on the host terminal go to Pi's own queue and are not listed.
 - Slash commands (added in 1.2): `text` is handled like a line typed on the host terminal. `/name args` naming an extension command runs that command at once, even while working, and adds no user message. Prompt templates and `/skill:name` expand before the prompt is sent, and follow the `deliverAs` rules above. Text starting with `/` that names nothing reaches the model unchanged. Pi's built-in terminal commands (`/model`, `/compact`, ...) are not available. `/remote` gets `400 bad_request`: it can only be run on the host terminal, since stopping remote would cut off the client. A command with `attachments` also gets `400 bad_request`, because commands take only text. This applies whatever version the client sends, so a 1.0 or 1.1 client whose text starts with a command name now runs that command.
 - A body that is not JSON, is over 1 MB, has neither non-empty `text` nor `attachments`, has a non-string `text`, malformed `attachments`, or has another `deliverAs` gets `400 bad_request`.
 - On success the server responds `202 {}`. The prompt then appears in the event stream like any other message; images appear as image blocks without bytes.
@@ -138,6 +140,14 @@ Sends a prompt.
 ### `POST /v1/abort`
 
 Stops the current run. If the host session is already settled, nothing happens. Responds `202 {}`.
+
+### `POST /v1/queue/{id}/steer`
+
+Added in 1.3. Takes a waiting follow-up out of the queue and delivers it now: within the current run like a `"steer"` prompt, or as a new run if the host session has just settled. Responds `202 {}`. An id that is not waiting (already sent, cancelled or dropped) gets `404 not_found`.
+
+### `DELETE /v1/queue/{id}`
+
+Added in 1.3. Drops a waiting follow-up without sending it. Responds `200 {}`. An id that is not waiting gets `404 not_found`.
 
 ### `POST /v1/dialogs/{id}/answer`
 
@@ -196,6 +206,18 @@ Text in a `toolResult` message, and text in a `tool_update` event, is cut to its
 }
 ```
 
+### FollowUp
+
+Added in 1.3. A remote follow-up waiting for the run to settle.
+
+```jsonc
+{
+  "id": "3fa9c1d2e4b5a607",
+  "text": "and then update the docs",   // as the client sent it; "" when it has only attachments
+  "attachments": [ { "name": "notes.txt", "mimeType": "text/plain" } ]
+}
+```
+
 ## Events
 
 Every event has `seq` and `type`. The `type` field matches the SSE `event:` name.
@@ -214,6 +236,7 @@ Every event has `seq` and `type`. The `type` field matches the SSE `event:` name
 | `dialog_closed` | `dialogId`, `closedBy`: `"terminal"`, `"remote"`, `"timeout"` or `"cancelled"` | a dialog is answered or gone |
 | `session_replaced` | `hostSession` | `/new`, `/resume`, `/fork` or reload replaced the host session; refetch the snapshot |
 | `notice` | `message`, `level`: `"info"`, `"warning"` or `"error"` | An extension called `ctx.ui.notify` on the terminal, such as the result of a slash command (added in 1.2) |
+| `queue` | `queue`: FollowUp list, oldest first | the follow-up queue changed: a follow-up was queued, sent, steered, cancelled or dropped (added in 1.3) |
 | `remote_off` | | remote is turning off; the client should stop reconnecting and show that it is unpaired |
 | `resync` | | the client fell too far behind; refetch the snapshot |
 

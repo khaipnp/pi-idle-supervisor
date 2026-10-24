@@ -30,11 +30,12 @@ describe("remote on/off", () => {
 		const body = await res.json();
 		assertSchema("Snapshot", body);
 		expect(body).toMatchObject({
-			protocolVersion: "1.2",
+			protocolVersion: "1.3",
 			hostSession: { id: host.session.sessionManager.getSessionId(), cwd: host.session.sessionManager.getCwd() },
 			status: "settled",
 			messages: [],
 			dialogs: [],
+			queue: [],
 		});
 	});
 
@@ -82,7 +83,7 @@ describe("request checks", () => {
 		for (const protocol of [undefined, "2.0", "0.9"]) {
 			const headers = { ...clientHeaders(token), "Pi-Remote-Protocol": protocol };
 			const error = await expectError(await remoteGet(url, "/v1/snapshot", headers), 426, "protocol_mismatch");
-			expect(error.serverVersion).toBe("1.2");
+			expect(error.serverVersion).toBe("1.3");
 		}
 		// A newer minor version is still compatible.
 		expect((await remoteGet(url, "/v1/snapshot", { ...clientHeaders(token), "Pi-Remote-Protocol": "1.7" })).status).toBe(200);
@@ -386,8 +387,9 @@ describe("prompt and abort", () => {
 		expect((await remotePost(url, "/v1/prompt", token, { text: "steer me", deliverAs: "steer" })).status).toBe(202);
 		expect((await remotePost(url, "/v1/prompt", token, { text: "then this", deliverAs: "followUp" })).status).toBe(202);
 		gate.release();
-		await vi.waitFor(async () => expect(userTexts(await snapshotOf(url, token))).toEqual(["start", "steer me", "then this"]));
-		await vi.waitFor(() => expect(stream.events.filter((e) => e.event === "settled")).toHaveLength(1));
+		// The follow-up waits for the first run to settle (test/queue.test.ts), then starts its own.
+		await vi.waitFor(() => expect(stream.events.filter((e) => e.event === "settled")).toHaveLength(2));
+		expect(userTexts(await snapshotOf(url, token))).toEqual(["start", "steer me", "then this"]);
 
 		const roles = (await snapshotOf(url, token)).messages.map((m: { role: string }) => m.role);
 		expect(roles).toEqual(["user", "assistant", "toolResult", "user", "assistant", "user", "assistant"]);

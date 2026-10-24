@@ -4,10 +4,9 @@ import type { AddressInfo } from "node:net";
 import { type EventBody, EventBuffer, type StoredEvent } from "./events.ts";
 import type { DialogAnswerResult } from "./dialogs.ts";
 import type { Snapshot } from "./snapshot.ts";
-import { MAX_ATTACHMENTS, MAX_UPLOAD_BYTES, Uploads, userContent } from "./uploads.ts";
-import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
+import { type Attachment, MAX_ATTACHMENTS, MAX_UPLOAD_BYTES, Uploads } from "./uploads.ts";
 
-export const PROTOCOL_VERSION = "1.2";
+export const PROTOCOL_VERSION = "1.3";
 export const PROTOCOL_MAJOR = PROTOCOL_VERSION.split(".")[0];
 
 const MAX_FAILURES = 10;
@@ -28,8 +27,11 @@ type ErrorCode =
 
 export type DeliverAs = "steer" | "followUp";
 
-/** "busy": the host session is working and `deliverAs` is missing. `rejected`: why the request is refused (400). */
-export type PromptResult = "sent" | "busy" | { rejected: string };
+/**
+ * "sent": Pi has it. "queued": a follow-up waiting for the run to settle. "busy": the host session is working and
+ * `deliverAs` is missing. `rejected`: why the request is refused (400).
+ */
+export type PromptResult = "sent" | "queued" | "busy" | { rejected: string };
 
 /** One entry of GET /v1/commands: something a client can send as `/name args`. */
 export interface CommandInfo {
@@ -44,8 +46,12 @@ export interface RemoteServerOptions {
 	port: number;
 	/** Builds the body of GET /v1/snapshot for an authorised request; `seq` is the last event so far. */
 	snapshot: (seq: number) => Snapshot;
-	/** Handles the text of POST /v1/prompt like a line typed on the terminal (a prompt or a slash command). */
-	prompt: (content: string | (TextContent | ImageContent)[], deliverAs: DeliverAs | undefined) => PromptResult;
+	/** Handles POST /v1/prompt like a line typed on the terminal (a prompt or a slash command); `text` may be "". */
+	prompt: (text: string, attachments: Attachment[], deliverAs: DeliverAs | undefined) => PromptResult;
+	/** Delivers the queued follow-up `id` now, as a steer while working; false when it is not waiting. */
+	steerQueued: (id: string) => boolean;
+	/** Drops the queued follow-up `id`; false when it is not waiting. */
+	cancelQueued: (id: string) => boolean;
 	/** The slash commands a client may send, for GET /v1/commands. */
 	commands: () => CommandInfo[];
 	/** Stops the current run; no-op when settled. */
@@ -73,7 +79,7 @@ export class RemoteServer {
 	) {}
 
 	/** Points the server at a new host session's runtime (ADR-0003); token, port and event log are kept. */
-	rebind(host: Pick<RemoteServerOptions, "snapshot" | "prompt" | "commands" | "abort" | "onClients">): void {
+	rebind(host: Pick<RemoteServerOptions, "snapshot" | "prompt" | "steerQueued" | "cancelQueued" | "commands" | "abort" | "onClients">): void {
 		this.options = { ...this.options, ...host };
 		this.detached = false;
 	}
@@ -184,6 +190,14 @@ export class RemoteServer {
 			}
 			return sendJson(res, 202, {});
 		}
+		const steerRoute = path.match(/^\/v1\/queue\/([^/]+)\/steer$/);
+		if (req.method === "POST" && steerRoute) {
+			return this.handleQueued(res, () => this.options.steerQueued(decodeId(steerRoute[1])), 202);
+		}
+		const queuedRoute = path.match(/^\/v1\/queue\/([^/]+)$/);
+		if (req.method === "DELETE" && queuedRoute) {
+			return this.handleQueued(res, () => this.options.cancelQueued(decodeId(queuedRoute[1])), 200);
+		}
 		const dialogRoute = path.match(/^\/v1\/dialogs\/([^/]+)\/answer$/);
 		if (req.method === "POST" && dialogRoute) {
 			return void this.handleDialogAnswer(dialogRoute[1], req, res).catch(() => sendFailure(res));
@@ -193,13 +207,7 @@ export class RemoteServer {
 
 	private async handleDialogAnswer(rawId: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
 		const body = await readJson(req);
-		let id = rawId;
-		try {
-			id = decodeURIComponent(rawId);
-		} catch {
-			// malformed escape: no dialog can have this id; fall through as unknown
-		}
-		switch (this.options.answerDialog(id, body)) {
+		switch (this.options.answerDialog(decodeId(rawId), body)) {
 			case "ok":
 				return sendJson(res, 200, {});
 			case "unknown":
@@ -209,6 +217,18 @@ export class RemoteServer {
 			case "invalid":
 				return sendError(res, 400, "bad_request", 'Body must be {"value": boolean | string matching the dialog kind} or {"cancelled": true}');
 		}
+	}
+
+	/** Answers a steer or cancel of a queued follow-up: `status` with `{}`, or 404 when it is no longer waiting. */
+	private handleQueued(res: ServerResponse, act: () => boolean, status: number): void {
+		let found: boolean;
+		try {
+			found = act();
+		} catch {
+			return sendFailure(res);
+		}
+		if (!found) return sendError(res, 404, "not_found", "No such follow-up is waiting; it was already sent, steered or cancelled");
+		sendJson(res, status, {});
 	}
 
 	private async handlePrompt(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -236,7 +256,7 @@ export class RemoteServer {
 		const files = this.uploads.find(ids as string[]);
 		if (!files) return sendError(res, 404, "not_found", "An attachment id is unknown");
 		// SAFETY: validText above checked that text is a string or undefined.
-		const result = this.options.prompt(userContent((text as string | undefined) ?? "", files), deliverAs);
+		const result = this.options.prompt((text as string | undefined) ?? "", files, deliverAs);
 		if (result === "busy") return sendError(res, 409, "busy", "The host session is working; set deliverAs to steer or followUp");
 		if (typeof result === "object") return sendError(res, 400, "bad_request", result.rejected);
 		sendJson(res, 202, {});
@@ -308,6 +328,15 @@ export class RemoteServer {
 			this.lockedUntil = now + LOCKOUT_MS;
 			this.failures = [];
 		}
+	}
+}
+
+/** A path segment as an id; a malformed escape gives the raw segment, which matches no id. */
+function decodeId(raw: string): string {
+	try {
+		return decodeURIComponent(raw);
+	} catch {
+		return raw;
 	}
 }
 

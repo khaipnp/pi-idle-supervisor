@@ -139,7 +139,17 @@ A prompt sent from a remote client is handled like a line typed on the terminal:
 - `GET /v1/commands` lists what can be sent, so the client can suggest commands as you type `/`.
 - Notifications shown on the terminal, such as a command's result, reach the phone as `notice` events. The pairing message, which holds the access token, is never sent.
 
-This is protocol 1.2. Clients written for 1.0 or 1.1 keep working, but text they send that starts with a command name now runs the command. Details are in `docs/protocol.md`.
+Clients written for 1.0 or 1.1 keep working, but text they send that starts with a command name now runs the command. Details are in `docs/protocol.md`.
+
+## Follow-ups from the phone
+
+A follow-up sent from a remote client while the agent is working waits in the extension's follow-up queue rather than in Pi's, so the client can still change its mind:
+
+- The client sees the waiting follow-ups and can steer one into the current run or cancel it.
+- When the run settles, the oldest follow-up starts the next run, one at a time.
+- Stopping the run (from the phone or with Escape on the terminal) drops the waiting follow-ups.
+
+This is protocol 1.3. Older clients keep working; their follow-ups just wait in the same queue. Details are in `docs/protocol.md`.
 
 ## Pairing
 

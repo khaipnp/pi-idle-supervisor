@@ -11,6 +11,8 @@ Checked on Pi 1.4.0. Paths are under `node_modules/@earendil-works/pi-coding-age
   - Then `/skill:name` and prompt templates expand.
   - Throws "Cannot submit a prompt while compaction is in progress..." during compaction (:1649).
   - While streaming without `streamingBehavior`, throws "Agent is already processing..." (:1667). When idle, `streamingBehavior` is ignored.
+- `agent_settled` carries `aborted` (`_agentRunAbortRequested`, :687), true when the run ended because of `abort()` (a remote abort or Escape). A prompt sent from an `agent_settled` handler runs once all handlers have returned (`_deferredSettledActions`, :695), which ADR-0006 relies on to start the next remote follow-up.
+- Extensions cannot see Pi's own steering and follow-up queues: `_steeringMessages` / `_followUpMessages` (:95, :97), `clearQueue()` (:1944) and the `queue_update` event (:656) belong to `AgentSession` only. `ExtensionContext` has just `hasPendingMessages()` (`extensions/types.d.ts:244`).
 - `_startRun` sets `_isAgentRunActive = true` (:1424) before awaiting `before_agent_start`; `agent_start` fires later. So there is a window where Pi is busy but an extension tracking `agent_start` still thinks it is settled.
 
 ## Commands and errors (`extensions/runner.js`)

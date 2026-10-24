@@ -1,6 +1,7 @@
 import type { Dialog } from "./dialogs.ts";
 import type { ImageContent, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { FollowUp } from "./queue.ts";
 import { PROTOCOL_VERSION } from "./server.ts";
 
 /** Max UTF-8 bytes of text kept per toolResult text block (docs/protocol.md, Block). */
@@ -29,6 +30,7 @@ export interface Snapshot {
 	status: "working" | "settled";
 	messages: Message[];
 	dialogs: Dialog[];
+	queue: FollowUp[];
 }
 
 export function hostSessionOf(sm: ExtensionContext["sessionManager"]): Snapshot["hostSession"] {
@@ -36,8 +38,17 @@ export function hostSessionOf(sm: ExtensionContext["sessionManager"]): Snapshot[
 	return { id: sm.getSessionId(), cwd: sm.getCwd(), ...(name ? { name } : {}) };
 }
 
-/** Body of GET /v1/snapshot; `seq` is the last event the state reflects. `dialogs` are those still waiting for an answer. */
-export function toSnapshot(sm: ExtensionContext["sessionManager"], status: Snapshot["status"], seq: number, dialogs: Dialog[]): Snapshot {
+/**
+ * Body of GET /v1/snapshot; `seq` is the last event the state reflects. `dialogs` are those still waiting for an
+ * answer, `queue` the remote follow-ups waiting for the run to settle.
+ */
+export function toSnapshot(
+	sm: ExtensionContext["sessionManager"],
+	status: Snapshot["status"],
+	seq: number,
+	dialogs: Dialog[],
+	queue: FollowUp[],
+): Snapshot {
 	return {
 		protocolVersion: PROTOCOL_VERSION,
 		seq,
@@ -45,6 +56,7 @@ export function toSnapshot(sm: ExtensionContext["sessionManager"], status: Snaps
 		status,
 		messages: toMessages(sm.getBranch()),
 		dialogs,
+		queue,
 	};
 }
 

@@ -3,9 +3,11 @@ import { renderUnicodeCompact } from "uqr";
 import { Dialogs, wrapDialogs } from "./dialogs.ts";
 import { clientsLabel, lanAddress, pairingString, probeTailscale, type PublicUrl, resolvePublicUrl } from "./pairing.ts";
 import { wrapNotify } from "./notices.ts";
+import { FollowUpQueue } from "./queue.ts";
 import { type CommandInfo, type DeliverAs, type PromptResult, RemoteServer } from "./server.ts";
 import { hostSessionOf, nextMessageId, toMessage, toSnapshot, toolUpdateText } from "./snapshot.ts";
 import { startSshTunnel, type Tunnel } from "./tunnel.ts";
+import { type Attachment, userContent } from "./uploads.ts";
 
 const DEFAULT_PORT = 7878;
 const REMOTE_COMMAND = "remote";
@@ -72,6 +74,8 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 	const emit = (body: Parameters<RemoteServer["emit"]>[0]) => {
 		if (!retired) state.server?.emit(body);
 	};
+	// Remote follow-ups belong to this host session: a replacement starts with none (ADR-0006).
+	const followUps = new FollowUpQueue((queue) => emit({ type: "queue", queue }));
 
 	const FOOTER_KEY = "remote";
 	/** Footer shows remote state and client count; undefined clears it. */
@@ -96,7 +100,7 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 		// A previous runtime left the server running (/new, /resume, /fork, reload): take it over.
 		clearTimeout(state.replacementTimer);
 		if (state.server) {
-			state.server.rebind({ snapshot, prompt, commands, abort: () => ctx?.abort(), onClients: refreshFooter });
+			state.server.rebind({ snapshot, prompt, steerQueued, cancelQueued, commands, abort: () => ctx?.abort(), onClients: refreshFooter });
 			refreshFooter();
 			if (state.tunnel) {
 				state.tunnel.onClose = onTunnelClose;
@@ -110,9 +114,14 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 		emit({ type: "status", status: "working" });
 	});
 	// agent_settled, not agent_end: agent_end fires before queued follow-ups and retries have run.
-	pi.on("agent_settled", () => {
+	pi.on("agent_settled", (event) => {
 		working = false;
 		emit({ type: "settled" });
+		// Stopping a run stops what was lined up after it too, as Escape does with Pi's own queue.
+		if (event.aborted) return followUps.clear();
+		// Pi holds a prompt sent while it settles until the settling is over, then starts a run (pi-internals.md).
+		const next = followUps.next();
+		if (next !== undefined) pi.sendUserMessage(next, { deliverAs: "followUp", expandPromptTemplates: true });
 	});
 	const liveMessage = (message: Parameters<typeof toMessage>[0], c: ExtensionContext) =>
 		state.server && !retired ? toMessage(message, nextMessageId(c.sessionManager.getBranch())) : undefined;
@@ -145,6 +154,7 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 	// the server; this runtime's handlers die with it, and requests in between get 503 busy.
 	pi.on("session_shutdown", async (event) => {
 		retired = true;
+		followUps.clear();
 		if (event.reason === "quit") return stopRemote();
 		// Replacement: dialogs belong to the old UI, so dismiss them; the next runtime adopts the server.
 		state.dialogs?.dispose();
@@ -177,15 +187,15 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 	}
 
 	function snapshot(seq: number) {
-		return toSnapshot(ctx!.sessionManager, working ? "working" : "settled", seq, state.dialogs?.list() ?? []);
+		return toSnapshot(ctx!.sessionManager, working ? "working" : "settled", seq, state.dialogs?.list() ?? [], followUps.list());
 	}
 
 	/**
 	 * Handles remote text like the terminal does: `/name args` runs an extension command (at once,
 	 * even while working), and prompt templates and `/skill:` commands expand. Anything else is a prompt.
+	 * A follow-up while working waits in `followUps`, where a client can still steer or cancel it.
 	 */
-	function prompt(content: Parameters<typeof pi.sendUserMessage>[0], deliverAs: DeliverAs | undefined): PromptResult {
-		const text = typeof content === "string" ? content : content.find((part) => part.type === "text")?.text ?? "";
+	function prompt(text: string, attachments: Attachment[], deliverAs: DeliverAs | undefined): PromptResult {
 		// Pi takes the name up to the first space, so match that exactly.
 		const name = text.startsWith("/") ? text.slice(1).split(" ", 1)[0] : undefined;
 		// Stopping or restarting remote from the phone would cut off the phone itself.
@@ -194,12 +204,29 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 		}
 		const isExtensionCommand = name !== undefined && pi.getCommands().some((c) => c.source === "extension" && c.name === name);
 		// Pi passes a command only the text, so attachments would be dropped or end up in its arguments.
-		if (isExtensionCommand && typeof content !== "string") return { rejected: "A slash command cannot have attachments" };
+		if (isExtensionCommand && attachments.length > 0) return { rejected: "A slash command cannot have attachments" };
 		// Same state as the snapshot. Settled: Pi starts a run and ignores deliverAs, but if a run started
 		// after `working` was read (typed on the terminal, say), followUp queues this instead of Pi dropping it.
 		if (working && !deliverAs && !isExtensionCommand) return "busy";
+		const content = userContent(text, attachments);
+		if (working && deliverAs === "followUp" && !isExtensionCommand) {
+			followUps.add(text, attachments, content);
+			return "queued";
+		}
 		pi.sendUserMessage(content, { deliverAs: working ? deliverAs : "followUp", expandPromptTemplates: true });
 		return "sent";
+	}
+
+	/** Sends a waiting follow-up now: within the run while working, or as a new run if it has just settled. */
+	function steerQueued(id: string): boolean {
+		const content = followUps.take(id);
+		if (content === undefined) return false;
+		pi.sendUserMessage(content, { deliverAs: working ? "steer" : "followUp", expandPromptTemplates: true });
+		return true;
+	}
+
+	function cancelQueued(id: string): boolean {
+		return followUps.take(id) !== undefined;
 	}
 
 	/** What a remote client may send as `/name`: everything Pi lists except /remote, which is terminal-only. */
@@ -241,6 +268,8 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 				port,
 				snapshot,
 				prompt,
+				steerQueued,
+				cancelQueued,
 				commands,
 				abort: () => ctx?.abort(),
 				answerDialog: (id, body) => state.dialogs?.answer(id, body) ?? "unknown",

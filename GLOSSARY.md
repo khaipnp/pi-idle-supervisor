@@ -50,6 +50,10 @@ _Avoid_: interrupt
 A prompt sent while the agent is working, delivered after the whole run finishes.
 _Avoid_: queued prompt
 
+**Follow-up queue**:
+The remote follow-ups waiting for the run to settle, held by the extension so a remote client can still steer or cancel each one; follow-ups typed on the terminal wait in Pi's own queue instead.
+_Avoid_: pending messages, outbox
+
 **Dialog**:
 A question that Pi or an extension blocks on until a person answers it (confirm, select, or input). It is offered to the terminal and every remote client at once, and the first answer wins.
 _Avoid_: approval, prompt, ui prompt

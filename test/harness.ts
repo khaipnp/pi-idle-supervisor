@@ -15,7 +15,7 @@ import {
 	SettingsManager,
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { fauxAssistantMessage, type FauxProviderHandle, fauxProvider, fauxToolCall, InMemoryCredentialStore, Type } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, type FauxModelDefinition, type FauxProviderHandle, fauxProvider, fauxToolCall, InMemoryCredentialStore, Type } from "@earendil-works/pi-ai";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import schema from "../schema/protocol.schema.json" with { type: "json" };
 import extension from "../src/extension.ts";
@@ -69,6 +69,10 @@ export async function createHost(
 		/** Prompt template files or directories to load. */
 		promptTemplates?: string[];
 		remote?: { port?: number; publicUrl?: string; tunnel?: string };
+		/** The faux provider's models; the first is the session's model. Default: one model, "faux-1". */
+		models?: FauxModelDefinition[];
+		/** Ids of models scoped to the session, as `enabledModels` would; unset leaves every model usable. */
+		scoped?: string[];
 	} = {},
 ): Promise<Host> {
 	// Remote state is process-global (ADR-0003); start every host from a clean slate.
@@ -76,7 +80,7 @@ export async function createHost(
 	delete (globalThis as { [key: symbol]: unknown })[Symbol.for("pi-idle-supervisor.remote")];
 	const cwd = mkdtempSync(join(tmpdir(), "pi-remote-test-"));
 	const agentDir = join(cwd, "agent");
-	const faux = fauxProvider({ models: [{ id: "faux-1", input: ["text", "image"] }] });
+	const faux = fauxProvider({ models: options.models ?? [{ id: "faux-1", input: ["text", "image"] }] });
 	const modelRuntime = await ModelRuntime.create({
 		credentials: new InMemoryCredentialStore(),
 		modelsPath: null,
@@ -105,6 +109,7 @@ export async function createHost(
 				sessionManager,
 				sessionStartEvent,
 				model: faux.getModel(),
+				scopedModels: options.scoped?.map((id) => ({ model: faux.getModel(id)! })),
 				noTools: "builtin",
 				customTools: options.tools,
 			})),

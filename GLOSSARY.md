@@ -62,6 +62,14 @@ _Avoid_: approval, prompt, ui prompt
 The host session has finished all automatic work and is waiting for a person.
 _Avoid_: done, idle, finished
 
+**Model**:
+The language model the host session sends its requests to; a remote client may switch it to one of the offered models, the session's model scope (`enabledModels`) or else every model with credentials.
+_Avoid_: provider, engine
+
+**Thinking level**:
+How much reasoning the model is asked to do before answering, from `off` to `max`; each model takes only some levels, and Pi moves any other level to the nearest one it takes.
+_Avoid_: reasoning effort, thinking budget
+
 ### Sync
 
 **Snapshot**:

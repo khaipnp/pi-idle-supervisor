@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { renderUnicodeCompact } from "uqr";
 import { Dialogs, wrapDialogs } from "./dialogs.ts";
 import { clientsLabel, lanAddress, pairingString, probeTailscale, type PublicUrl, resolvePublicUrl } from "./pairing.ts";
+import { type ModelState, offeredModels, type ThinkingLevel, toModelInfo } from "./models.ts";
 import { wrapNotify } from "./notices.ts";
 import { FollowUpQueue } from "./queue.ts";
 import { type CommandInfo, type DeliverAs, type PromptResult, RemoteServer } from "./server.ts";
@@ -100,7 +101,19 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 		// A previous runtime left the server running (/new, /resume, /fork, reload): take it over.
 		clearTimeout(state.replacementTimer);
 		if (state.server) {
-			state.server.rebind({ snapshot, prompt, steerQueued, cancelQueued, image, commands, abort: () => ctx?.abort(), onClients: refreshFooter });
+			state.server.rebind({
+				snapshot,
+				prompt,
+				steerQueued,
+				cancelQueued,
+				image,
+				commands,
+				abort: () => ctx?.abort(),
+				models,
+				setModel,
+				setThinkingLevel,
+				onClients: refreshFooter,
+			});
 			refreshFooter();
 			if (state.tunnel) {
 				state.tunnel.onClose = onTunnelClose;
@@ -141,6 +154,9 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 		const message = liveMessage(event.message, c);
 		if (message) emit({ type: "message_end", message });
 	});
+	// Whoever made the change (a client, the terminal's /model or Ctrl+P, an extension), every client hears of it.
+	pi.on("model_select", (event) => emit({ type: "model", model: toModelInfo(event.model), thinkingLevel: pi.getThinkingLevel() }));
+	pi.on("thinking_level_select", (event, c) => emit({ type: "model", ...modelState(c), thinkingLevel: event.level }));
 	pi.on("tool_execution_start", (event) => {
 		emit({ type: "tool_start", toolCallId: event.toolCallId, toolName: event.toolName, arguments: event.args });
 	});
@@ -187,7 +203,28 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 	}
 
 	function snapshot(seq: number) {
-		return toSnapshot(ctx!.sessionManager, working ? "working" : "settled", seq, state.dialogs?.list() ?? [], followUps.list());
+		return toSnapshot(ctx!.sessionManager, working ? "working" : "settled", seq, state.dialogs?.list() ?? [], followUps.list(), modelState(ctx!));
+	}
+
+	function modelState(c: ExtensionContext): ModelState {
+		return { ...(c.model ? { model: toModelInfo(c.model) } : {}), thinkingLevel: pi.getThinkingLevel() };
+	}
+
+	function models() {
+		return offeredModels(ctx!).map(toModelInfo);
+	}
+
+	/** Switches this session's model; Pi keeps the default for new sessions as it was. */
+	async function setModel(provider: string, id: string): Promise<ModelState | "unknown" | "refused"> {
+		const model = offeredModels(ctx!).find((m) => m.provider === provider && m.id === id);
+		if (!model) return "unknown";
+		if (!(await pi.setModel(model))) return "refused";
+		return modelState(ctx!);
+	}
+
+	function setThinkingLevel(level: ThinkingLevel): ModelState {
+		pi.setThinkingLevel(level);
+		return modelState(ctx!);
 	}
 
 	/**
@@ -278,6 +315,9 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 				image,
 				commands,
 				abort: () => ctx?.abort(),
+				models,
+				setModel,
+				setThinkingLevel,
 				answerDialog: (id, body) => state.dialogs?.answer(id, body) ?? "unknown",
 				onClients: refreshFooter,
 			});

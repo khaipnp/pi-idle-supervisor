@@ -155,6 +155,10 @@ This is protocol 1.3. Older clients keep working; their follow-ups just wait in 
 
 Since protocol 1.4 a remote client can fetch the images in the conversation, such as a photo sent from the phone or an image a tool read, with `GET /v1/messages/{id}/images/{n}`, so it can show them rather than a placeholder. Snapshots and events still carry no image bytes.
 
+## Model and thinking level
+
+Since protocol 1.5 a remote client can see which model and thinking level the session uses and change them, as `/model` and Shift+Tab do on the terminal. It offers the models in your `enabledModels` setting (or `--models`), or every model you have credentials for when that is not set. The switch applies to the running session only, and works while the agent is working. Changes made on the terminal show up on the phone too.
+
 ## Pairing
 
 Scan the QR code with the client, or paste the pairing string. The string looks like `pi-remote://pair?url=<public url>&token=<access token>&v=1`.

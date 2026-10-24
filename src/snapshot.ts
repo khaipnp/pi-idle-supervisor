@@ -1,6 +1,7 @@
 import type { Dialog } from "./dialogs.ts";
 import type { ImageContent, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { ModelState } from "./models.ts";
 import type { FollowUp } from "./queue.ts";
 import { PROTOCOL_VERSION } from "./server.ts";
 
@@ -31,6 +32,10 @@ export interface Snapshot {
 	messages: Message[];
 	dialogs: Dialog[];
 	queue: FollowUp[];
+	/** Added in 1.5. */
+	model?: ModelState["model"];
+	/** Added in 1.5. */
+	thinkingLevel: ModelState["thinkingLevel"];
 }
 
 export function hostSessionOf(sm: ExtensionContext["sessionManager"]): Snapshot["hostSession"] {
@@ -40,7 +45,7 @@ export function hostSessionOf(sm: ExtensionContext["sessionManager"]): Snapshot[
 
 /**
  * Body of GET /v1/snapshot; `seq` is the last event the state reflects. `dialogs` are those still waiting for an
- * answer, `queue` the remote follow-ups waiting for the run to settle.
+ * answer, `queue` the remote follow-ups waiting for the run to settle, `model` the session's model and thinking level.
  */
 export function toSnapshot(
 	sm: ExtensionContext["sessionManager"],
@@ -48,6 +53,7 @@ export function toSnapshot(
 	seq: number,
 	dialogs: Dialog[],
 	queue: FollowUp[],
+	model: ModelState,
 ): Snapshot {
 	return {
 		protocolVersion: PROTOCOL_VERSION,
@@ -57,6 +63,7 @@ export function toSnapshot(
 		messages: toMessages(sm.getBranch()),
 		dialogs,
 		queue,
+		...model,
 	};
 }
 

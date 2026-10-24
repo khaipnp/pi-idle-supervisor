@@ -3,10 +3,11 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 import { type EventBody, EventBuffer, type StoredEvent } from "./events.ts";
 import type { DialogAnswerResult } from "./dialogs.ts";
+import { isThinkingLevel, type ModelInfo, type ModelState, type ThinkingLevel } from "./models.ts";
 import type { Snapshot } from "./snapshot.ts";
 import { type Attachment, MAX_ATTACHMENTS, MAX_UPLOAD_BYTES, Uploads } from "./uploads.ts";
 
-export const PROTOCOL_VERSION = "1.4";
+export const PROTOCOL_VERSION = "1.5";
 export const PROTOCOL_MAJOR = PROTOCOL_VERSION.split(".")[0];
 
 const MAX_FAILURES = 10;
@@ -58,6 +59,15 @@ export interface RemoteServerOptions {
 	commands: () => CommandInfo[];
 	/** Stops the current run; no-op when settled. */
 	abort: () => void;
+	/** The models a client may switch to, for GET /v1/models. */
+	models: () => ModelInfo[];
+	/**
+	 * Switches the session to an offered model, for POST /v1/model. "unknown": not offered. "refused": Pi has no
+	 * credentials for it.
+	 */
+	setModel: (provider: string, id: string) => Promise<ModelState | "unknown" | "refused">;
+	/** Sets the thinking level, clamped to what the model takes, for POST /v1/thinking. */
+	setThinkingLevel: (level: ThinkingLevel) => ModelState;
 	/** Applies a remote answer to a pending dialog. */
 	answerDialog: (id: string, body: unknown) => DialogAnswerResult;
 	/** Called with the number of connected event-stream clients whenever it changes. */
@@ -81,7 +91,12 @@ export class RemoteServer {
 	) {}
 
 	/** Points the server at a new host session's runtime (ADR-0003); token, port and event log are kept. */
-	rebind(host: Pick<RemoteServerOptions, "snapshot" | "prompt" | "steerQueued" | "cancelQueued" | "image" | "commands" | "abort" | "onClients">): void {
+	rebind(
+		host: Pick<
+			RemoteServerOptions,
+			"snapshot" | "prompt" | "steerQueued" | "cancelQueued" | "image" | "commands" | "abort" | "models" | "setModel" | "setThinkingLevel" | "onClients"
+		>,
+	): void {
 		this.options = { ...this.options, ...host };
 		this.detached = false;
 	}
@@ -177,6 +192,19 @@ export class RemoteServer {
 			} catch {
 				return sendFailure(res);
 			}
+		}
+		if (req.method === "GET" && path === "/v1/models") {
+			try {
+				return sendJson(res, 200, { models: this.options.models() });
+			} catch {
+				return sendFailure(res);
+			}
+		}
+		if (req.method === "POST" && path === "/v1/model") {
+			return void this.handleModel(req, res).catch(() => sendFailure(res));
+		}
+		if (req.method === "POST" && path === "/v1/thinking") {
+			return void this.handleThinking(req, res).catch(() => sendFailure(res));
 		}
 		const imageRoute = path.match(/^\/v1\/messages\/([^/]+)\/images\/(\d{1,4})$/);
 		if (req.method === "GET" && imageRoute) {
@@ -281,6 +309,29 @@ export class RemoteServer {
 		if (result === "busy") return sendError(res, 409, "busy", "The host session is working; set deliverAs to steer or followUp");
 		if (typeof result === "object") return sendError(res, 400, "bad_request", result.rejected);
 		sendJson(res, 202, {});
+	}
+
+	private async handleModel(req: IncomingMessage, res: ServerResponse): Promise<void> {
+		const body = await readJson(req);
+		// SAFETY: body is arbitrary client JSON; every field is validated below before use.
+		const { provider, id } = (typeof body === "object" && body !== null ? body : {}) as { provider?: unknown; id?: unknown };
+		if (typeof provider !== "string" || typeof id !== "string") {
+			return sendError(res, 400, "bad_request", 'Body must be {"provider": string, "id": string}');
+		}
+		const result = await this.options.setModel(provider, id);
+		if (result === "unknown") return sendError(res, 404, "not_found", "No such model is offered; see GET /v1/models");
+		if (result === "refused") return sendError(res, 400, "bad_request", "The host has no credentials for that model");
+		sendJson(res, 200, result);
+	}
+
+	private async handleThinking(req: IncomingMessage, res: ServerResponse): Promise<void> {
+		const body = await readJson(req);
+		// SAFETY: body is arbitrary client JSON; `level` is validated below before use.
+		const { level } = (typeof body === "object" && body !== null ? body : {}) as { level?: unknown };
+		if (!isThinkingLevel(level)) {
+			return sendError(res, 400, "bad_request", 'Body must be {"level": "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"}');
+		}
+		sendJson(res, 200, this.options.setThinkingLevel(level));
 	}
 
 	/** Stores the raw request body as a file on the host machine; the name comes from `?name=`, the type from Content-Type. */

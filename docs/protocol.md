@@ -2,7 +2,7 @@
 
 The contract between a **host session** (the `pi-idle-supervisor` extension) and a **remote client** (for example the Android app, in its own repo). Terms follow `GLOSSARY.md`.
 
-Protocol version: **1.4**. A change that breaks existing clients bumps the major version. Adding a field, event type, or endpoint bumps the minor version, and clients must ignore fields and event types they don't know.
+Protocol version: **1.5**. A change that breaks existing clients bumps the major version. Adding a field, event type, or endpoint bumps the minor version, and clients must ignore fields and event types they don't know.
 
 ## Transport
 
@@ -31,7 +31,7 @@ Clients send these headers:
 
 ```
 Authorization: Bearer <access token>
-Pi-Remote-Protocol: 1.4
+Pi-Remote-Protocol: 1.5
 ```
 
 The server checks them in this order:
@@ -56,17 +56,19 @@ Returns the whole current conversation of the host session, together with the ev
 
 ```json
 {
-  "protocolVersion": "1.4",
+  "protocolVersion": "1.5",
   "seq": 1042,
   "hostSession": { "id": "…", "cwd": "/Users/me/project", "name": "optional" },
   "status": "working",
   "messages": [ /* Message, oldest first */ ],
   "dialogs": [ /* Dialog, every dialog still waiting for an answer */ ],
-  "queue": [ /* FollowUp, remote follow-ups waiting for the run to settle, oldest first */ ]
+  "queue": [ /* FollowUp, remote follow-ups waiting for the run to settle, oldest first */ ],
+  "model": { /* Model, the session's model; missing when Pi has none */ },
+  "thinkingLevel": "medium"
 }
 ```
 
-`status` is either `"working"` or `"settled"`. `queue` was added in 1.3.
+`status` is either `"working"` or `"settled"`. `queue` was added in 1.3; `model` and `thinkingLevel` in 1.5. `thinkingLevel` is one of `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`.
 
 To connect, a client fetches the snapshot, then opens the event stream with `Last-Event-ID: <seq>`.
 
@@ -101,6 +103,42 @@ Added in 1.2. Lists the slash commands a client can send as `text` in `POST /v1/
 - `description` may be missing.
 - `/remote` is never listed. Pi's built-in terminal commands are not listed either, because they cannot be sent.
 - The list changes when the host reloads, so fetch it again rather than caching it for the whole pairing.
+
+### `GET /v1/models`
+
+Added in 1.5. Lists the models a client can switch to with `POST /v1/model`.
+
+```json
+{ "models": [ { "provider": "anthropic", "id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "thinkingLevels": ["off", "minimal", "low", "medium", "high"] } ] }
+```
+
+- When the host session has a model scope (Pi's `enabledModels` setting or `--models`), the list is that scope, in its order: the models the terminal cycles through. Otherwise it is every model the host has credentials for.
+- The session's current model may be missing from the list, for example when it was picked outside the scope.
+
+### `POST /v1/model`
+
+Added in 1.5. Switches the host session to one of the listed models, as `/model` on the terminal does, even while working; the current run carries on and the next request uses the new model. It applies to this host session only: Pi's default model for new sessions stays as it was.
+
+```json
+{ "provider": "anthropic", "id": "claude-sonnet-4-5" }
+```
+
+- Responds `200` with the new `{"model", "thinkingLevel"}`. Pi keeps the thinking level where the new model supports it, and otherwise picks the nearest one it does, so the level can change too.
+- A model that is not in `GET /v1/models` gets `404 not_found`. A model the host has no credentials for gets `400 bad_request`.
+- A body without string `provider` and `id` gets `400 bad_request`.
+- Every client, including the sender, also gets a `model` event.
+
+### `POST /v1/thinking`
+
+Added in 1.5. Sets the host session's thinking level, as Shift+Tab on the terminal does.
+
+```json
+{ "level": "high" }
+```
+
+- Responds `200` with the new `{"model", "thinkingLevel"}`. A level the model does not take is moved to the nearest one it does, as Pi does, so `thinkingLevel` can differ from `level`. A model without thinking always has `"off"`.
+- A `level` that is not one of the thinking levels gets `400 bad_request`.
+- Every client gets a `model` event when the level changes.
 
 ### `POST /v1/files`
 
@@ -210,6 +248,19 @@ Text in a `toolResult` message, and text in a `tool_update` event, is cut to its
 }
 ```
 
+### Model
+
+Added in 1.5. A model the host session can use.
+
+```jsonc
+{
+  "provider": "anthropic",
+  "id": "claude-sonnet-4-5",
+  "name": "Claude Sonnet 4.5",                   // for display; the id when the model has no name
+  "thinkingLevels": ["off", "low", "medium", "high"] // the levels it takes, lowest first; ["off"] without thinking
+}
+```
+
 ### FollowUp
 
 Added in 1.3. A remote follow-up waiting for the run to settle.
@@ -241,6 +292,7 @@ Every event has `seq` and `type`. The `type` field matches the SSE `event:` name
 | `session_replaced` | `hostSession` | `/new`, `/resume`, `/fork` or reload replaced the host session; refetch the snapshot |
 | `notice` | `message`, `level`: `"info"`, `"warning"` or `"error"` | An extension called `ctx.ui.notify` on the terminal, such as the result of a slash command (added in 1.2) |
 | `queue` | `queue`: FollowUp list, oldest first | the follow-up queue changed: a follow-up was queued, sent, steered, cancelled or dropped (added in 1.3) |
+| `model` | `model`: Model (missing when Pi has none), `thinkingLevel` | the model or thinking level changed, from a client, the terminal or an extension (added in 1.5) |
 | `remote_off` | | remote is turning off; the client should stop reconnecting and show that it is unpaired |
 | `resync` | | the client fell too far behind; refetch the snapshot |
 

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/khaipnp/pi-idle-supervisor/schema/protocol.schema.json",
-  "title": "pi-idle-supervisor remote control protocol 1.4",
+  "title": "pi-idle-supervisor remote control protocol 1.5",
   "description": "Bodies and events described in docs/protocol.md. Clients must ignore unknown fields and unknown event types.",
   "$defs": {
     "Error": {
@@ -114,9 +114,43 @@
         }
       }
     },
+    "ThinkingLevel": { "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"] },
+    "Model": {
+      "type": "object",
+      "required": ["provider", "id", "name", "thinkingLevels"],
+      "properties": {
+        "provider": { "type": "string" },
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "thinkingLevels": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/ThinkingLevel" } }
+      }
+    },
+    "ModelState": {
+      "type": "object",
+      "required": ["thinkingLevel"],
+      "properties": {
+        "model": { "$ref": "#/$defs/Model" },
+        "thinkingLevel": { "$ref": "#/$defs/ThinkingLevel" }
+      }
+    },
+    "ModelList": {
+      "type": "object",
+      "required": ["models"],
+      "properties": { "models": { "type": "array", "items": { "$ref": "#/$defs/Model" } } }
+    },
+    "ModelRequest": {
+      "type": "object",
+      "required": ["provider", "id"],
+      "properties": { "provider": { "type": "string" }, "id": { "type": "string" } }
+    },
+    "ThinkingRequest": {
+      "type": "object",
+      "required": ["level"],
+      "properties": { "level": { "$ref": "#/$defs/ThinkingLevel" } }
+    },
     "Snapshot": {
       "type": "object",
-      "required": ["protocolVersion", "seq", "hostSession", "status", "messages", "dialogs", "queue"],
+      "required": ["protocolVersion", "seq", "hostSession", "status", "messages", "dialogs", "queue", "thinkingLevel"],
       "properties": {
         "protocolVersion": { "type": "string", "pattern": "^1\\.[0-9]+$" },
         "seq": { "type": "integer", "minimum": 0 },
@@ -124,7 +158,9 @@
         "status": { "$ref": "#/$defs/Status" },
         "messages": { "type": "array", "items": { "$ref": "#/$defs/Message" } },
         "dialogs": { "type": "array", "items": { "$ref": "#/$defs/Dialog" } },
-        "queue": { "type": "array", "items": { "$ref": "#/$defs/FollowUp" } }
+        "queue": { "type": "array", "items": { "$ref": "#/$defs/FollowUp" } },
+        "model": { "$ref": "#/$defs/Model" },
+        "thinkingLevel": { "$ref": "#/$defs/ThinkingLevel" }
       }
     },
     "PromptRequest": {
@@ -230,6 +266,10 @@
           "required": ["message", "level"]
         },
         { "properties": { "type": { "const": "queue" }, "queue": { "type": "array", "items": { "$ref": "#/$defs/FollowUp" } } }, "required": ["queue"] },
+        {
+          "properties": { "type": { "const": "model" }, "model": { "$ref": "#/$defs/Model" }, "thinkingLevel": { "$ref": "#/$defs/ThinkingLevel" } },
+          "required": ["thinkingLevel"]
+        },
         { "properties": { "type": { "const": "remote_off" } } },
         { "properties": { "type": { "const": "resync" } } }
       ]

@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 import { type EventBody, EventBuffer, type StoredEvent } from "./events.ts";
 import type { DialogAnswerResult } from "./dialogs.ts";
-import { isThinkingLevel, type ModelInfo, type ModelState, type ThinkingLevel } from "./models.ts";
+import { isThinkingLevel, THINKING_LEVELS, type ModelInfo, type ModelState, type ThinkingLevel } from "./models.ts";
 import type { Snapshot } from "./snapshot.ts";
 import { type Attachment, MAX_ATTACHMENTS, MAX_UPLOAD_BYTES, Uploads } from "./uploads.ts";
 
@@ -329,7 +329,7 @@ export class RemoteServer {
 		// SAFETY: body is arbitrary client JSON; `level` is validated below before use.
 		const { level } = (typeof body === "object" && body !== null ? body : {}) as { level?: unknown };
 		if (!isThinkingLevel(level)) {
-			return sendError(res, 400, "bad_request", 'Body must be {"level": "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"}');
+			return sendError(res, 400, "bad_request", `Body must be {"level": ${THINKING_LEVELS.map((l) => `"${l}"`).join(" | ")}}`);
 		}
 		sendJson(res, 200, this.options.setThinkingLevel(level));
 	}

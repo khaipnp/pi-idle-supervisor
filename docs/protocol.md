@@ -126,7 +126,7 @@ Added in 1.5. Switches the host session to one of the listed models, as `/model`
 - Responds `200` with the new `{"model", "thinkingLevel"}`. Pi keeps the thinking level where the new model supports it, and otherwise picks the nearest one it does, so the level can change too.
 - A model that is not in `GET /v1/models` gets `404 not_found`. A model the host has no credentials for gets `400 bad_request`.
 - A body without string `provider` and `id` gets `400 bad_request`.
-- Every client, including the sender, also gets a `model` event.
+- Every client, including the sender, also gets a `model` event; two when the thinking level changes too, the last one holding the final state.
 
 ### `POST /v1/thinking`
 

@@ -15,6 +15,13 @@ Checked on Pi 1.4.0. Paths are under `node_modules/@earendil-works/pi-coding-age
 - Extensions cannot see Pi's own steering and follow-up queues: `_steeringMessages` / `_followUpMessages` (:95, :97), `clearQueue()` (:1944) and the `queue_update` event (:656) belong to `AgentSession` only. `ExtensionContext` has just `hasPendingMessages()` (`extensions/types.d.ts:244`).
 - `_startRun` sets `_isAgentRunActive = true` (:1424) before awaiting `before_agent_start`; `agent_start` fires later. So there is a window where Pi is busy but an extension tracking `agent_start` still thinks it is settled.
 
+## Model and thinking level (`agent-session.js`)
+
+- The extension `pi.setModel(model)` (:2805) returns `false` when `hasConfiguredAuth(provider)` fails, else awaits `session.setModel(model)` and returns `true`. `session.setModel` (:2008) throws `No API key for <provider>/<id>` when `checkAuth` fails, so a configured but unusable credential rejects instead of returning `false`. Without `persist` it changes this session only (it appends a `model_change` entry); the default model in settings stays.
+- `session.setModel` sets the model first, then `setThinkingLevel` for it, then emits `model_select`. So when the switch changes the level, `thinking_level_select` fires first, already seeing the new model in `ctx.model`, and clients get two `model` events.
+- `setThinkingLevel(level)` (:2114) moves a level the model does not take to another through `clampThinkingLevel` (`pi-ai/dist/models.js:705`): the nearest higher level it takes, else the nearest lower one. It emits `thinking_level_select` only when the level actually changes.
+- `ctx.scopedModels` holds the resolved `enabledModels` setting or `--models` patterns, in their order, and is empty when neither is set.
+
 ## Commands and errors (`extensions/runner.js`)
 
 - Colliding command names are renamed `name:1`, `name:2` (:570). `pi.getCommands()` returns these invocation names; skills appear as `skill:<name>`.

@@ -218,7 +218,12 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 	async function setModel(provider: string, id: string): Promise<ModelState | "unknown" | "refused"> {
 		const model = offeredModels(ctx!).find((m) => m.provider === provider && m.id === id);
 		if (!model) return "unknown";
-		if (!(await pi.setModel(model))) return "refused";
+		try {
+			// False without configured credentials; throws when they are configured but do not work (pi-internals.md).
+			if (!(await pi.setModel(model))) return "refused";
+		} catch {
+			return "refused";
+		}
 		return modelState(ctx!);
 	}
 

@@ -1,6 +1,6 @@
 {
   "name": "pi-idle-supervisor",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Remote control for a running Pi session: watch and steer it from a remote client. Tested with Pi 1.4.x.",
   "type": "module",
   "license": "MIT",

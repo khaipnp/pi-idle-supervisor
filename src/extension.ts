@@ -2,7 +2,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { renderUnicodeCompact } from "uqr";
 import { Dialogs, wrapDialogs } from "./dialogs.ts";
 import { clientsLabel, lanAddress, pairingString, probeTailscale, type PublicUrl, resolvePublicUrl } from "./pairing.ts";
-import { type DeliverAs, type PromptResult, RemoteServer } from "./server.ts";
+import { wrapNotify } from "./notices.ts";
+import { type CommandInfo, type DeliverAs, type PromptResult, RemoteServer } from "./server.ts";
 import { hostSessionOf, nextMessageId, toMessage, toSnapshot, toolUpdateText } from "./snapshot.ts";
 import { startSshTunnel, type Tunnel } from "./tunnel.ts";
 
@@ -16,6 +17,11 @@ interface RemoteSettings {
 	publicUrl?: string;
 	/** "ssh" opens a localhost.run tunnel. Unset: use `publicUrl` or Tailscale. */
 	tunnel?: string;
+}
+
+/** Pi renames colliding commands to `remote:1`, `remote:2`, so treat those as ours too rather than guess. */
+function isRemoteCommand(name: string): boolean {
+	return name === REMOTE_COMMAND || name.startsWith(`${REMOTE_COMMAND}:`);
 }
 
 /** How the phone reaches the server. "auto": --url, then publicUrl, then Tailscale if running, then localhost. */
@@ -41,7 +47,7 @@ function flagValue(args: string, name: string): string | undefined {
 interface Shared {
 	server?: RemoteServer;
 	dialogs?: Dialogs;
-	warnedDialogs?: boolean;
+	warnedUiWrap?: boolean;
 	stopping?: Promise<void>;
 	/** Where clients reach the server: a tunnel URL, or the LAN address the server listens on. */
 	publicUrl?: string;
@@ -77,14 +83,19 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 	pi.on("session_start", (_event, c) => {
 		ctx = c;
 		// Wrapping depends on how Pi builds ctx.ui (ADR-0001); if that changed, remote still works minus dialogs.
-		if (!wrapDialogs(c.ui, () => state.dialogs) && !state.warnedDialogs) {
-			state.warnedDialogs = true;
-			c.ui.notify("Remote dialogs are unavailable: this Pi version's UI context is not what pi-idle-supervisor expects.", "warning");
+		const dialogsWrapped = wrapDialogs(c.ui, () => state.dialogs);
+		const noticesWrapped = wrapNotify(c.ui, (message, level) => {
+			// The pairing notification carries the access token; clients must never see it.
+			if (state.server && !message.includes(state.server.token)) emit({ type: "notice", message, level });
+		});
+		if (!(dialogsWrapped && noticesWrapped) && !state.warnedUiWrap) {
+			state.warnedUiWrap = true;
+			c.ui.notify("Remote dialogs or notices are unavailable: this Pi version's UI context is not what pi-idle-supervisor expects.", "warning");
 		}
 		// A previous runtime left the server running (/new, /resume, /fork, reload): take it over.
 		clearTimeout(state.replacementTimer);
 		if (state.server) {
-			state.server.rebind({ snapshot, prompt, abort: () => ctx?.abort(), onClients: refreshFooter });
+			state.server.rebind({ snapshot, prompt, commands, abort: () => ctx?.abort(), onClients: refreshFooter });
 			refreshFooter();
 			if (state.tunnel) {
 				state.tunnel.onClose = onTunnelClose;
@@ -176,19 +187,26 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 		const text = typeof content === "string" ? content : content.find((part) => part.type === "text")?.text ?? "";
 		// Pi takes the name up to the first space, so match that exactly.
 		const name = text.startsWith("/") ? text.slice(1).split(" ", 1)[0] : undefined;
-		// Stopping or restarting remote from the phone would cut off the phone itself. Pi renames colliding
-		// commands to `remote:1`, `remote:2`, so block those too rather than guess which one is ours.
-		if (name === REMOTE_COMMAND || name?.startsWith(`${REMOTE_COMMAND}:`)) {
+		// Stopping or restarting remote from the phone would cut off the phone itself.
+		if (name !== undefined && isRemoteCommand(name)) {
 			return { rejected: `/${REMOTE_COMMAND} can only be run on the host terminal` };
 		}
 		const isExtensionCommand = name !== undefined && pi.getCommands().some((c) => c.source === "extension" && c.name === name);
 		// Pi passes a command only the text, so attachments would be dropped or end up in its arguments.
 		if (isExtensionCommand && typeof content !== "string") return { rejected: "A slash command cannot have attachments" };
-		// Same state as the snapshot: settled starts a run and ignores deliverAs.
-		if (!working || isExtensionCommand) pi.sendUserMessage(content, { expandPromptTemplates: true });
-		else if (deliverAs) pi.sendUserMessage(content, { deliverAs, expandPromptTemplates: true });
-		else return "busy";
+		// Same state as the snapshot. Settled: Pi starts a run and ignores deliverAs, but if a run started
+		// after `working` was read (typed on the terminal, say), followUp queues this instead of Pi dropping it.
+		if (working && !deliverAs && !isExtensionCommand) return "busy";
+		pi.sendUserMessage(content, { deliverAs: working ? deliverAs : "followUp", expandPromptTemplates: true });
 		return "sent";
+	}
+
+	/** What a remote client may send as `/name`: everything Pi lists except /remote, which is terminal-only. */
+	function commands(): CommandInfo[] {
+		return pi
+			.getCommands()
+			.filter((c) => !isRemoteCommand(c.name))
+			.map((c) => ({ name: c.name, ...(c.description ? { description: c.description } : {}), source: c.source }));
 	}
 
 	/** Ways a phone can reach the server, as offered by `/remote` with no arguments. */
@@ -222,6 +240,7 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 				port,
 				snapshot,
 				prompt,
+				commands,
 				abort: () => ctx?.abort(),
 				answerDialog: (id, body) => state.dialogs?.answer(id, body) ?? "unknown",
 				onClients: refreshFooter,

@@ -136,6 +136,8 @@ A prompt sent from a remote client is handled like a line typed on the terminal:
 - Prompt templates and `/skill:name` expand as usual.
 - Pi's built-in commands (`/model`, `/compact`, ...) only work on the terminal, and so does `/remote`.
 - A command can't carry attachments.
+- `GET /v1/commands` lists what can be sent, so the client can suggest commands as you type `/`.
+- Notifications shown on the terminal, such as a command's result, reach the phone as `notice` events. The pairing message, which holds the access token, is never sent.
 
 This is protocol 1.2. Clients written for 1.0 or 1.1 keep working, but text they send that starts with a command name now runs the command. Details are in `docs/protocol.md`.
 

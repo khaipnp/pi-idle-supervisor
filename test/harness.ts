@@ -63,7 +63,13 @@ export interface Host {
 }
 
 export async function createHost(
-	options: { tools?: ToolDefinition[]; extensions?: ExtensionFactory[]; remote?: { port?: number; publicUrl?: string; tunnel?: string } } = {},
+	options: {
+		tools?: ToolDefinition[];
+		extensions?: ExtensionFactory[];
+		/** Prompt template files or directories to load. */
+		promptTemplates?: string[];
+		remote?: { port?: number; publicUrl?: string; tunnel?: string };
+	} = {},
 ): Promise<Host> {
 	// Remote state is process-global (ADR-0003); start every host from a clean slate.
 	delete (globalThis as { [key: symbol]: unknown })[Symbol.for("pi-idle-supervisor.remote")];
@@ -89,6 +95,7 @@ export async function createHost(
 				noThemes: true,
 				noContextFiles: true,
 				extensionFactories: [extension, ...(options.extensions ?? [])],
+				additionalPromptTemplatePaths: options.promptTemplates,
 			},
 		});
 		return {

@@ -119,6 +119,24 @@
         "deliverAs": { "enum": ["steer", "followUp"] }
       }
     },
+    "CommandList": {
+      "type": "object",
+      "required": ["commands"],
+      "properties": {
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "source"],
+            "properties": {
+              "name": { "type": "string" },
+              "description": { "type": "string" },
+              "source": { "enum": ["extension", "prompt", "skill"] }
+            }
+          }
+        }
+      }
+    },
     "UploadResponse": {
       "type": "object",
       "required": ["id", "name", "mimeType", "size"],
@@ -190,6 +208,10 @@
           "required": ["dialogId", "closedBy"]
         },
         { "properties": { "type": { "const": "session_replaced" }, "hostSession": { "$ref": "#/$defs/HostSession" } }, "required": ["hostSession"] },
+        {
+          "properties": { "type": { "const": "notice" }, "message": { "type": "string" }, "level": { "enum": ["info", "warning", "error"] } },
+          "required": ["message", "level"]
+        },
         { "properties": { "type": { "const": "remote_off" } } },
         { "properties": { "type": { "const": "resync" } } }
       ]

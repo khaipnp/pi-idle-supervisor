@@ -31,6 +31,13 @@ export type DeliverAs = "steer" | "followUp";
 /** "busy": the host session is working and `deliverAs` is missing. `rejected`: why the request is refused (400). */
 export type PromptResult = "sent" | "busy" | { rejected: string };
 
+/** One entry of GET /v1/commands: something a client can send as `/name args`. */
+export interface CommandInfo {
+	name: string;
+	description?: string;
+	source: "extension" | "prompt" | "skill";
+}
+
 export interface RemoteServerOptions {
 	/** Address to listen on: 127.0.0.1 behind a tunnel, or this machine's private LAN address. Default 127.0.0.1. */
 	host?: string;
@@ -39,6 +46,8 @@ export interface RemoteServerOptions {
 	snapshot: (seq: number) => Snapshot;
 	/** Handles the text of POST /v1/prompt like a line typed on the terminal (a prompt or a slash command). */
 	prompt: (content: string | (TextContent | ImageContent)[], deliverAs: DeliverAs | undefined) => PromptResult;
+	/** The slash commands a client may send, for GET /v1/commands. */
+	commands: () => CommandInfo[];
 	/** Stops the current run; no-op when settled. */
 	abort: () => void;
 	/** Applies a remote answer to a pending dialog. */
@@ -64,7 +73,7 @@ export class RemoteServer {
 	) {}
 
 	/** Points the server at a new host session's runtime (ADR-0003); token, port and event log are kept. */
-	rebind(host: Pick<RemoteServerOptions, "snapshot" | "prompt" | "abort" | "onClients">): void {
+	rebind(host: Pick<RemoteServerOptions, "snapshot" | "prompt" | "commands" | "abort" | "onClients">): void {
 		this.options = { ...this.options, ...host };
 		this.detached = false;
 	}
@@ -152,6 +161,13 @@ export class RemoteServer {
 			return sendJson(res, 200, this.options.snapshot(this.events.lastSeq));
 		}
 		if (req.method === "GET" && path === "/v1/events") return this.stream(req, res);
+		if (req.method === "GET" && path === "/v1/commands") {
+			try {
+				return sendJson(res, 200, { commands: this.options.commands() });
+			} catch {
+				return sendFailure(res);
+			}
+		}
 		if (req.method === "POST" && path === "/v1/files") {
 			return void this.handleUpload(req, res).catch(() => sendFailure(res));
 		}

@@ -38,6 +38,10 @@ _Avoid_: input, command, ui prompt
 A line starting with `/name` that runs an extension's command instead of reaching the agent, typed in the terminal or sent by a remote client in place of a prompt.
 _Avoid_: command (alone), action
 
+**Notice**:
+A short notification that an extension shows on the terminal through `ctx.ui.notify`, such as a slash command's result, also sent to remote clients.
+_Avoid_: toast, alert, message
+
 **Steer**:
 A prompt sent while the agent is working, delivered after its current turn.
 _Avoid_: interrupt

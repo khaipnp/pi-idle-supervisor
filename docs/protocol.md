@@ -88,6 +88,19 @@ data: {"seq":1043, ...}
 - A resume point that is not a non-negative integer gets `400 bad_request`.
 - Every 15 seconds the server sends a `: ping` comment line, so that proxies and the client can detect a dead connection.
 
+### `GET /v1/commands`
+
+Added in 1.2. Lists the slash commands a client can send as `text` in `POST /v1/prompt`, for suggestions as the person types `/`.
+
+```json
+{ "commands": [ { "name": "review", "description": "Review staged git changes", "source": "prompt" } ] }
+```
+
+- `source` is `"extension"` (an extension command), `"prompt"` (a prompt template) or `"skill"` (named `skill:<name>`).
+- `description` may be missing.
+- `/remote` is never listed. Pi's built-in terminal commands are not listed either, because they cannot be sent.
+- The list changes when the host reloads, so fetch it again rather than caching it for the whole pairing.
+
 ### `POST /v1/files`
 
 Uploads one file so a later prompt can attach it. Added in 1.1.
@@ -116,7 +129,7 @@ Sends a prompt.
 - `attachments` (added in 1.1) is optional: up to 4 distinct ids from `POST /v1/files`. An unknown id gets `404 not_found`.
 - Images (`image/png`, `image/jpeg`, `image/gif`, `image/webp`) reach Pi as images. Any other file is stored on the host machine and its path is added to the prompt text, so the agent reads it with its own tools.
 - `deliverAs` is optional and is either `"steer"` or `"followUp"`.
-- If the host session is settled, the prompt starts a run, and the server ignores `deliverAs`.
+- If the host session is settled, the prompt starts a run, and the server ignores `deliverAs`. If a run started on the host at the same moment, the prompt is queued as a follow-up instead.
 - If the host session is working and `deliverAs` is missing, the server responds `409 busy`.
 - Slash commands (added in 1.2): `text` is handled like a line typed on the host terminal. `/name args` naming an extension command runs that command at once, even while working, and adds no user message. Prompt templates and `/skill:name` expand before the prompt is sent, and follow the `deliverAs` rules above. Text starting with `/` that names nothing reaches the model unchanged. Pi's built-in terminal commands (`/model`, `/compact`, ...) are not available. `/remote` gets `400 bad_request`: it can only be run on the host terminal, since stopping remote would cut off the client. A command with `attachments` also gets `400 bad_request`, because commands take only text. This applies whatever version the client sends, so a 1.0 or 1.1 client whose text starts with a command name now runs that command.
 - A body that is not JSON, is over 1 MB, has neither non-empty `text` nor `attachments`, has a non-string `text`, malformed `attachments`, or has another `deliverAs` gets `400 bad_request`.
@@ -200,6 +213,7 @@ Every event has `seq` and `type`. The `type` field matches the SSE `event:` name
 | `dialog_open` | `dialog`: Dialog | a dialog is waiting for an answer |
 | `dialog_closed` | `dialogId`, `closedBy`: `"terminal"`, `"remote"`, `"timeout"` or `"cancelled"` | a dialog is answered or gone |
 | `session_replaced` | `hostSession` | `/new`, `/resume`, `/fork` or reload replaced the host session; refetch the snapshot |
+| `notice` | `message`, `level`: `"info"`, `"warning"` or `"error"` | An extension called `ctx.ui.notify` on the terminal, such as the result of a slash command (added in 1.2) |
 | `remote_off` | | remote is turning off; the client should stop reconnecting and show that it is unpaired |
 | `resync` | | the client fell too far behind; refetch the snapshot |
 

@@ -73,6 +73,8 @@ export async function createHost(
 		models?: FauxModelDefinition[];
 		/** Ids of models scoped to the session, as `enabledModels` would; unset leaves every model usable. */
 		scoped?: string[];
+		/** Keep sessions in files under the test directory, so Pi can list and reopen them. Default: in memory. */
+		persist?: boolean;
 	} = {},
 ): Promise<Host> {
 	// Remote state is process-global (ADR-0003); start every host from a clean slate.
@@ -117,7 +119,11 @@ export async function createHost(
 			diagnostics: services.diagnostics,
 		};
 	};
-	const runtime = await createAgentSessionRuntime(createRuntime, { cwd, agentDir, sessionManager: SessionManager.inMemory(cwd) });
+	const runtime = await createAgentSessionRuntime(createRuntime, {
+		cwd,
+		agentDir,
+		sessionManager: options.persist ? SessionManager.create(cwd, join(cwd, "sessions")) : SessionManager.inMemory(cwd),
+	});
 
 	const notifications: Notification[] = [];
 	const statuses = new Map<string, string | undefined>();
@@ -137,8 +143,20 @@ export async function createHost(
 		notify: (message, type) => notifications.push({ message, type }),
 		setStatus: (key, text) => void statuses.set(key, text),
 	};
-	// SAFETY: the fake terminal implements the parts of the UI context the extension uses.
-	const bind = (session: AgentSession) => session.bindExtensions({ uiContext: terminal as ExtensionUIContext });
+	const bind = (session: AgentSession) =>
+		session.bindExtensions({
+			// SAFETY: the fake terminal implements the parts of the UI context the extension uses.
+			uiContext: terminal as ExtensionUIContext,
+			// What interactive mode gives commands: session changes go through the runtime.
+			commandContextActions: {
+				waitForIdle: () => runtime.session.waitForIdle(),
+				newSession: (options) => runtime.newSession(options),
+				fork: (entryId, options) => runtime.fork(entryId, options),
+				navigateTree: (targetId, options) => runtime.session.navigateTree(targetId, options),
+				switchSession: (path, options) => runtime.switchSession(path, options),
+				reload: () => runtime.session.reload(),
+			},
+		});
 	runtime.setRebindSession(bind);
 	await bind(runtime.session);
 

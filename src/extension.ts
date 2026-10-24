@@ -5,13 +5,19 @@ import { clientsLabel, lanAddress, pairingString, probeTailscale, type PublicUrl
 import { type ModelState, offeredModels, type ThinkingLevel, toModelInfo } from "./models.ts";
 import { wrapNotify } from "./notices.ts";
 import { FollowUpQueue } from "./queue.ts";
-import { type CommandInfo, type DeliverAs, type PromptResult, RemoteServer } from "./server.ts";
+import { type CommandInfo, type DeliverAs, type OpenSessionResult, type PromptResult, RemoteServer } from "./server.ts";
+import { sessionPath, sessionSummaries } from "./sessions.ts";
 import { hostSessionOf, imageOf, nextMessageId, toMessage, toSnapshot, toolUpdateText } from "./snapshot.ts";
 import { startSshTunnel, type Tunnel } from "./tunnel.ts";
 import { type Attachment, userContent } from "./uploads.ts";
 
 const DEFAULT_PORT = 7878;
 const REMOTE_COMMAND = "remote";
+/**
+ * Hidden command a client's session switch runs through: only a command handler gets Pi's newSession and
+ * switchSession, and `pi.sendUserMessage("/…")` runs one. `new` or `switch <id>`.
+ */
+const SESSION_COMMAND = "remote-session";
 /** How long the server waits for a replacement session before giving up and turning remote off. */
 export const REPLACEMENT_TIMEOUT_MS = 30_000;
 
@@ -24,7 +30,7 @@ interface RemoteSettings {
 
 /** Pi renames colliding commands to `remote:1`, `remote:2`, so treat those as ours too rather than guess. */
 function isRemoteCommand(name: string): boolean {
-	return name === REMOTE_COMMAND || name.startsWith(`${REMOTE_COMMAND}:`);
+	return [REMOTE_COMMAND, SESSION_COMMAND].some((own) => name === own || name.startsWith(`${own}:`));
 }
 
 /** How the phone reaches the server. "auto": --url, then publicUrl, then Tailscale if running, then localhost. */
@@ -112,6 +118,8 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 				models,
 				setModel,
 				setThinkingLevel,
+				sessions,
+				openSession,
 				onClients: refreshFooter,
 			});
 			refreshFooter();
@@ -232,6 +240,18 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 		return modelState(ctx!);
 	}
 
+	function sessions() {
+		return sessionSummaries(ctx!.sessionManager);
+	}
+
+	/** Leaves this session for session `id`, or a new one; the replacement reaches clients as session_replaced. */
+	async function openSession(id: string | undefined): Promise<OpenSessionResult> {
+		if (working) return "busy";
+		if (id !== undefined && !(await sessionPath(ctx!.sessionManager, id))) return "unknown";
+		pi.sendUserMessage(`/${SESSION_COMMAND} ${id === undefined ? "new" : `switch ${id}`}`, { expandPromptTemplates: true });
+		return "ok";
+	}
+
 	/**
 	 * Handles remote text like the terminal does: `/name args` runs an extension command (at once,
 	 * even while working), and prompt templates and `/skill:` commands expand. Anything else is a prompt.
@@ -242,7 +262,7 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 		const name = text.startsWith("/") ? text.slice(1).split(" ", 1)[0] : undefined;
 		// Stopping or restarting remote from the phone would cut off the phone itself.
 		if (name !== undefined && isRemoteCommand(name)) {
-			return { rejected: `/${REMOTE_COMMAND} can only be run on the host terminal` };
+			return { rejected: `/${name} can only be run on the host terminal` };
 		}
 		const isExtensionCommand = name !== undefined && pi.getCommands().some((c) => c.source === "extension" && c.name === name);
 		// Pi passes a command only the text, so attachments would be dropped or end up in its arguments.
@@ -323,6 +343,8 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 				models,
 				setModel,
 				setThinkingLevel,
+				sessions,
+				openSession,
 				answerDialog: (id, body) => state.dialogs?.answer(id, body) ?? "unknown",
 				onClients: refreshFooter,
 			});
@@ -377,6 +399,17 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 		}
 		c.ui.notify(`Remote is on at ${publicUrl.url}${warning}\n${renderUnicodeCompact(pairing)}\nPair with: ${pairing}`, "info");
 	}
+
+	pi.registerCommand(SESSION_COMMAND, {
+		description: "Used by remote clients to open a session; use /new or /resume instead",
+		handler: async (args, c) => {
+			const [sub, id] = args.trim().split(/\s+/);
+			if (sub === "new") return void (await c.newSession());
+			const path = sub === "switch" && id ? await sessionPath(c.sessionManager, id) : undefined;
+			if (!path) return c.ui.notify(`/${SESSION_COMMAND}: no such session`, "error");
+			await c.switchSession(path);
+		},
+	});
 
 	pi.registerCommand(REMOTE_COMMAND, {
 		description: "Remote control: /remote (pick how to connect) | start [--lan | --tailscale | --tunnel ssh | --url <https url>] | stop | status",

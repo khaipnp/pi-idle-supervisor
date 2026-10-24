@@ -159,6 +159,8 @@ Since protocol 1.4 a remote client can fetch the images in the conversation, suc
 
 Since protocol 1.5 a remote client can see which model and thinking level the session uses and change them, as `/model` and Shift+Tab do on the terminal. It offers the models in your `enabledModels` setting (or `--models`), or every model you have credentials for when that is not set. The switch applies to the running session only, and works while the agent is working. Changes made on the terminal show up on the phone too.
 
+Since protocol 1.6 a remote client can list this project's saved sessions, open one, or start a new one, as `/resume` and `/new` do on the terminal. It cannot leave a session while the agent is working.
+
 ## Pairing
 
 Scan the QR code with the client, or paste the pairing string. The string looks like `pi-remote://pair?url=<public url>&token=<access token>&v=1`.

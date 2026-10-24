@@ -4,10 +4,11 @@ import type { AddressInfo } from "node:net";
 import { type EventBody, EventBuffer, type StoredEvent } from "./events.ts";
 import type { DialogAnswerResult } from "./dialogs.ts";
 import { isThinkingLevel, THINKING_LEVELS, type ModelInfo, type ModelState, type ThinkingLevel } from "./models.ts";
+import type { SessionSummary } from "./sessions.ts";
 import type { Snapshot } from "./snapshot.ts";
 import { type Attachment, MAX_ATTACHMENTS, MAX_UPLOAD_BYTES, Uploads } from "./uploads.ts";
 
-export const PROTOCOL_VERSION = "1.5";
+export const PROTOCOL_VERSION = "1.6";
 export const PROTOCOL_MAJOR = PROTOCOL_VERSION.split(".")[0];
 
 const MAX_FAILURES = 10;
@@ -33,6 +34,9 @@ export type DeliverAs = "steer" | "followUp";
  * `deliverAs` is missing. `rejected`: why the request is refused (400).
  */
 export type PromptResult = "sent" | "queued" | "busy" | { rejected: string };
+
+/** "unknown": no such session. "busy": the host session is working, so it cannot be left. */
+export type OpenSessionResult = "ok" | "unknown" | "busy";
 
 /** One entry of GET /v1/commands: something a client can send as `/name args`. */
 export interface CommandInfo {
@@ -68,6 +72,10 @@ export interface RemoteServerOptions {
 	setModel: (provider: string, id: string) => Promise<ModelState | "unknown" | "refused">;
 	/** Sets the thinking level, clamped to what the model takes, for POST /v1/thinking. */
 	setThinkingLevel: (level: ThinkingLevel) => ModelState;
+	/** The host sessions a client may switch to, for GET /v1/sessions. */
+	sessions: () => Promise<SessionSummary[]>;
+	/** Opens session `id` (undefined: a new one), for POST /v1/session and /v1/session/new. */
+	openSession: (id: string | undefined) => Promise<OpenSessionResult>;
 	/** Applies a remote answer to a pending dialog. */
 	answerDialog: (id: string, body: unknown) => DialogAnswerResult;
 	/** Called with the number of connected event-stream clients whenever it changes. */
@@ -94,7 +102,7 @@ export class RemoteServer {
 	rebind(
 		host: Pick<
 			RemoteServerOptions,
-			"snapshot" | "prompt" | "steerQueued" | "cancelQueued" | "image" | "commands" | "abort" | "models" | "setModel" | "setThinkingLevel" | "onClients"
+			"snapshot" | "prompt" | "steerQueued" | "cancelQueued" | "image" | "commands" | "abort" | "models" | "setModel" | "setThinkingLevel" | "sessions" | "openSession" | "onClients"
 		>,
 	): void {
 		this.options = { ...this.options, ...host };
@@ -202,6 +210,25 @@ export class RemoteServer {
 		}
 		if (req.method === "POST" && path === "/v1/model") {
 			return void this.handleModel(req, res).catch(() => sendFailure(res));
+		}
+		if (req.method === "GET" && path === "/v1/sessions") {
+			return void this.options
+				.sessions()
+				.then((sessions) => sendJson(res, 200, { sessions }))
+				.catch(() => sendFailure(res));
+		}
+		if (req.method === "POST" && path === "/v1/session/new") {
+			return void this.handleOpenSession(res, undefined).catch(() => sendFailure(res));
+		}
+		if (req.method === "POST" && path === "/v1/session") {
+			return void readJson(req)
+				.then((body) => {
+					// SAFETY: body is arbitrary client JSON; `id` is validated below before use.
+					const { id } = (typeof body === "object" && body !== null ? body : {}) as { id?: unknown };
+					if (typeof id !== "string" || id === "") return sendError(res, 400, "bad_request", 'Body must be {"id": string}');
+					return this.handleOpenSession(res, id);
+				})
+				.catch(() => sendFailure(res));
 		}
 		if (req.method === "POST" && path === "/v1/thinking") {
 			return void this.handleThinking(req, res).catch(() => sendFailure(res));
@@ -322,6 +349,17 @@ export class RemoteServer {
 		if (result === "unknown") return sendError(res, 404, "not_found", "No such model is offered; see GET /v1/models");
 		if (result === "refused") return sendError(res, 400, "bad_request", "The host has no credentials for that model");
 		sendJson(res, 200, result);
+	}
+
+	private async handleOpenSession(res: ServerResponse, id: string | undefined): Promise<void> {
+		switch (await this.options.openSession(id)) {
+			case "ok":
+				return sendJson(res, 202, {});
+			case "unknown":
+				return sendError(res, 404, "not_found", "No such session; see GET /v1/sessions");
+			case "busy":
+				return sendError(res, 409, "busy", "The host session is working; stop it first");
+		}
 	}
 
 	private async handleThinking(req: IncomingMessage, res: ServerResponse): Promise<void> {

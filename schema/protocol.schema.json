@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/khaipnp/pi-idle-supervisor/schema/protocol.schema.json",
-  "title": "pi-idle-supervisor remote control protocol 1.5",
+  "title": "pi-idle-supervisor remote control protocol 1.6",
   "description": "Bodies and events described in docs/protocol.md. Clients must ignore unknown fields and unknown event types.",
   "$defs": {
     "Error": {
@@ -137,6 +137,29 @@
       "type": "object",
       "required": ["models"],
       "properties": { "models": { "type": "array", "items": { "$ref": "#/$defs/Model" } } }
+    },
+    "SessionList": {
+      "type": "object",
+      "required": ["sessions"],
+      "properties": { "sessions": { "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/SessionSummary" } } }
+    },
+    "SessionSummary": {
+      "type": "object",
+      "required": ["id", "title", "modified", "messageCount", "current"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "title": { "type": "string" },
+        "modified": { "type": "string", "format": "date-time" },
+        "messageCount": { "type": "integer", "minimum": 0 },
+        "current": { "type": "boolean" }
+      }
+    },
+    "SessionRequest": {
+      "type": "object",
+      "required": ["id"],
+      "properties": { "id": { "type": "string", "minLength": 1 } }
     },
     "ModelRequest": {
       "type": "object",

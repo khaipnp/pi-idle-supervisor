@@ -2,7 +2,7 @@
 
 The contract between a **host session** (the `pi-idle-supervisor` extension) and a **remote client** (for example the Android app, in its own repo). Terms follow `GLOSSARY.md`.
 
-Protocol version: **1.5**. A change that breaks existing clients bumps the major version. Adding a field, event type, or endpoint bumps the minor version, and clients must ignore fields and event types they don't know.
+Protocol version: **1.6**. A change that breaks existing clients bumps the major version. Adding a field, event type, or endpoint bumps the minor version, and clients must ignore fields and event types they don't know.
 
 ## Transport
 
@@ -31,7 +31,7 @@ Clients send these headers:
 
 ```
 Authorization: Bearer <access token>
-Pi-Remote-Protocol: 1.5
+Pi-Remote-Protocol: 1.6
 ```
 
 The server checks them in this order:
@@ -56,7 +56,7 @@ Returns the whole current conversation of the host session, together with the ev
 
 ```json
 {
-  "protocolVersion": "1.5",
+  "protocolVersion": "1.6",
   "seq": 1042,
   "hostSession": { "id": "…", "cwd": "/Users/me/project", "name": "optional" },
   "status": "working",
@@ -101,7 +101,7 @@ Added in 1.2. Lists the slash commands a client can send as `text` in `POST /v1/
 
 - `source` is `"extension"` (an extension command), `"prompt"` (a prompt template) or `"skill"` (named `skill:<name>`).
 - `description` may be missing.
-- `/remote` is never listed. Pi's built-in terminal commands are not listed either, because they cannot be sent.
+- `/remote` and `/remote-session` are never listed, and sending them is refused. Pi's built-in terminal commands are not listed either, because they cannot be sent.
 - The list changes when the host reloads, so fetch it again rather than caching it for the whole pairing.
 
 ### `GET /v1/models`
@@ -139,6 +139,34 @@ Added in 1.5. Sets the host session's thinking level, as Shift+Tab on the termin
 - Responds `200` with the new `{"model", "thinkingLevel"}`. A level the model does not take is moved to the nearest one it does, as Pi does, so `thinkingLevel` can differ from `level`. A model without thinking always has `"off"`.
 - A `level` that is not one of the thinking levels gets `400 bad_request`.
 - Every client gets a `model` event when the level changes.
+
+### `GET /v1/sessions`
+
+Added in 1.6. Lists Pi's saved sessions in the host session's working directory, newest first, at most 50: the ones the terminal's `/resume` offers for this project.
+
+```json
+{ "sessions": [ { "id": "0199…", "name": "flaky test", "title": "flaky test", "modified": "2026-10-25T09:12:00.000Z", "messageCount": 14, "current": true } ] }
+```
+
+- `title` is the session's name (set with `/name`) when it has one, and otherwise the start of its first prompt. `name` is missing when there is none.
+- `current` marks the open host session. A new session that has no reply yet is not saved, so it is not listed.
+- File paths are never sent.
+
+### `POST /v1/session`
+
+Added in 1.6. Opens a listed session in place of the current one, as `/resume` on the terminal does.
+
+```json
+{ "id": "0199…" }
+```
+
+- Responds `202 {}`. The switch then happens as any session replacement: clients get `session_replaced` and fetch a new snapshot (ADR-0003). The terminal can still refuse it, for example from an extension's `session_before_switch`; then nothing follows.
+- An id that is not listed gets `404 not_found`; a body without a string `id` gets `400 bad_request`.
+- While working it gets `409 busy`: stop the run first.
+
+### `POST /v1/session/new`
+
+Added in 1.6. Starts a new, empty host session, as `/new` on the terminal does. Responds as `POST /v1/session` does, without the `404`.
 
 ### `POST /v1/files`
 

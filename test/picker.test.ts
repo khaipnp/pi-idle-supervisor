@@ -3,6 +3,7 @@ import { lanAddress } from "../src/pairing.ts";
 import { clientHeaders, createHost, type Host, remoteGet } from "./harness.ts";
 
 // The real probe depends on whether Tailscale runs on this machine; each test picks the answer.
+// SAFETY: widens the initial undefined to the type the tests assign.
 const tailscale = vi.hoisted(() => ({ url: undefined as string | undefined }));
 vi.mock("../src/pairing.ts", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../src/pairing.ts")>()),

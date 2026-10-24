@@ -214,6 +214,7 @@ describe("event stream", () => {
 		const snapshot = await (await remoteGet(url, "/v1/snapshot", clientHeaders(token))).json();
 		expect(snapshot.seq).toBe(stream.events.length);
 		// message_end carries the same ids the snapshot uses.
+		// SAFETY: events are validated against the schema's Event as they arrive.
 		const ended = stream.events.filter((e) => e.event === "message_end").map((e) => (e.data.message as { id: string }).id);
 		expect(ended).toEqual(snapshot.messages.map((m: { id: string }) => m.id));
 		stream.close();
@@ -347,6 +348,7 @@ describe("prompt and abort", () => {
 		expect(await res.json()).toEqual({});
 		await stream.waitForType("settled");
 
+		// SAFETY: events are validated against the schema's Event as they arrive.
 		const user = stream.events.find((e) => e.event === "message_start")!.data.message as { role: string; content: unknown };
 		expect(user).toMatchObject({ role: "user", content: [{ type: "text", text: "hello from phone" }] });
 		expect(userTexts(await snapshotOf(url, token))).toEqual(["hello from phone"]);

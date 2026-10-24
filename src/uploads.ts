@@ -46,6 +46,7 @@ export class Uploads {
 	/** The files for `ids`, or undefined when any id is unknown. */
 	find(ids: string[]): Attachment[] | undefined {
 		const found = ids.map((id) => this.files.get(id));
+		// SAFETY: every() just checked that no id is missing.
 		return found.every((f) => f !== undefined) ? (found as Attachment[]) : undefined;
 	}
 

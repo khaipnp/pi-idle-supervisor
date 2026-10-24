@@ -16,6 +16,7 @@ interface OpenDialog {
 	placeholder?: string;
 }
 const dialogOf = async (stream: { waitForType(t: string): Promise<{ data: { [k: string]: unknown } }> }) =>
+	// SAFETY: events are validated against the schema's Event as they arrive.
 	(await stream.waitForType("dialog_open")).data.dialog as OpenDialog;
 
 /** A tool that runs `ask` against the shared ctx.ui, like any other extension would. */
@@ -60,6 +61,7 @@ describe("remote dialogs", () => {
 		const { url, token, stream, result } = await start((ui) => ui.select("Pick", ["a", "b"]));
 		const open = await stream!.waitForType("dialog_open");
 		assertSchema("Event", open.data);
+		// SAFETY: events are validated against the schema's Event as they arrive.
 		const dialog = open.data.dialog as { id: string };
 		expect(dialog).toMatchObject({ kind: "select", title: "Pick", options: ["a", "b"] });
 		expect((await snapshotOf(url, token)).dialogs).toEqual([dialog]);
@@ -115,6 +117,7 @@ describe("remote dialogs", () => {
 	test("the caller's timeout closes the dialog with expiresAt published", async () => {
 		const { stream, result } = await start((ui) => ui.confirm("Quick", "now", { timeout: 50 }));
 		const open = await stream!.waitForType("dialog_open");
+		// SAFETY: events are validated against the schema's Event as they arrive.
 		expect(typeof (open.data.dialog as { expiresAt: unknown }).expiresAt).toBe("number");
 		expect(await result).toBe(false);
 		expect((await stream!.waitForType("dialog_closed")).data).toMatchObject({ closedBy: "timeout" });

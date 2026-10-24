@@ -104,10 +104,12 @@ export class RemoteServer {
 	}
 
 	get port(): number {
+		// SAFETY: address() of a listening TCP server is an AddressInfo, never a string or null.
 		return (this.server.address() as AddressInfo).port;
 	}
 
 	get url(): string {
+		// SAFETY: address() of a listening TCP server is an AddressInfo, never a string or null.
 		return `http://${(this.server.address() as AddressInfo).address}:${this.port}`;
 	}
 
@@ -230,8 +232,10 @@ export class RemoteServer {
 				`Body must be {"text"?: string, "attachments"?: up to ${MAX_ATTACHMENTS} distinct file ids, "deliverAs"?: "steer" | "followUp"} with text or an attachment`,
 			);
 		}
+		// SAFETY: validIds above checked that ids is an array of strings.
 		const files = this.uploads.find(ids as string[]);
 		if (!files) return sendError(res, 404, "not_found", "An attachment id is unknown");
+		// SAFETY: validText above checked that text is a string or undefined.
 		const result = this.options.prompt(userContent((text as string | undefined) ?? "", files), deliverAs);
 		if (result === "busy") return sendError(res, 409, "busy", "The host session is working; set deliverAs to steer or followUp");
 		if (typeof result === "object") return sendError(res, 400, "bad_request", result.rejected);
@@ -257,6 +261,7 @@ export class RemoteServer {
 
 	/** SSE stream: replays events after the resume point, then continues live. */
 	private stream(req: IncomingMessage, res: ServerResponse): void {
+		// SAFETY: Node gives a single-valued header such as last-event-id as a string.
 		const resumeAt = (req.headers["last-event-id"] as string | undefined) ?? new URL(req.url ?? "/", "http://localhost").searchParams.get("after");
 		if (resumeAt !== null && resumeAt !== undefined && !/^\d+$/.test(resumeAt)) {
 			return sendError(res, 400, "bad_request", "Last-Event-ID / after must be a non-negative integer");

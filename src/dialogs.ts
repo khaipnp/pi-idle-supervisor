@@ -95,6 +95,7 @@ export class Dialogs {
 	answer(id: string, body: unknown): DialogAnswerResult {
 		const pending = this.pending.get(id);
 		if (!pending) return this.closed.has(id) ? "closed" : "unknown";
+		// SAFETY: only an object's fields are read, and each is checked below before use.
 		const fields = typeof body === "object" && body !== null ? (body as { value?: unknown; cancelled?: unknown }) : {};
 		if (fields.cancelled === true) {
 			pending.finish("remote", pending.cancelValue);

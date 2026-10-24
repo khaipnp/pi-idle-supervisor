@@ -17,6 +17,7 @@ const upload = (url: string, token: string, name: string, type: string, body: Ui
 	});
 
 /** The text parts of the first user message in the host session. */
+// SAFETY: user messages in these tests carry an array of content parts.
 const firstUserContent = (h: Host) => (h.session.messages.find((m) => m.role === "user") as { content: Array<{ type: string; text?: string; mimeType?: string }> } | undefined)?.content;
 
 // A valid 1x1 PNG: Pi resizes images it receives, so a fake header would be dropped.

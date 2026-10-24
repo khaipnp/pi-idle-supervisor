@@ -72,6 +72,7 @@ export async function createHost(
 	} = {},
 ): Promise<Host> {
 	// Remote state is process-global (ADR-0003); start every host from a clean slate.
+	// SAFETY: the extension keeps its process-global state under this symbol (ADR-0003).
 	delete (globalThis as { [key: symbol]: unknown })[Symbol.for("pi-idle-supervisor.remote")];
 	const cwd = mkdtempSync(join(tmpdir(), "pi-remote-test-"));
 	const agentDir = join(cwd, "agent");
@@ -156,6 +157,7 @@ export async function createHost(
 			if (!pairing) throw new Error(`no pairing string in ${JSON.stringify(notifications.slice(before))}`);
 			const params = new URL(pairing).searchParams;
 			// The pairing url is the public one; tests talk to the real loopback address.
+			// SAFETY: the extension keeps its process-global state under this symbol (ADR-0003).
 			const server = (globalThis as { [key: symbol]: { server?: { url: string } } })[Symbol.for("pi-idle-supervisor.remote")]?.server;
 			return { url: server!.url, publicUrl: params.get("url")!, token: params.get("token")! };
 		},
@@ -168,6 +170,7 @@ export async function createHost(
 
 /** A remote client request with the documented headers, overridable per call. */
 export function remoteGet(url: string, path: string, headers: Record<string, string | undefined>): Promise<Response> {
+	// SAFETY: the filter just dropped the undefined values.
 	const defined = Object.fromEntries(Object.entries(headers).filter(([, v]) => v !== undefined)) as Record<string, string>;
 	return fetch(url + path, { headers: defined });
 }

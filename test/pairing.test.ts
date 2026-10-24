@@ -75,6 +75,7 @@ describe("pairing UX", () => {
 	test("a busy port is a clear error, not another port", async () => {
 		const blocker = createServer();
 		await new Promise<void>((resolve) => blocker.listen(0, "127.0.0.1", resolve));
+		// SAFETY: address() of a listening TCP server is an AddressInfo.
 		const port = (blocker.address() as { port: number }).port;
 		try {
 			host = await createHost({ remote: { port } });

@@ -38,6 +38,7 @@ function normaliseUrl(value: string): { url: string; localOnly: boolean } | unde
  */
 export function magicDnsUrl(statusJson: string): string | undefined {
 	try {
+		// SAFETY: every field is optional and read with `?.`; malformed status throws into the catch below.
 		const status = JSON.parse(statusJson) as { BackendState?: string; Self?: { DNSName?: string } };
 		const dns = status.Self?.DNSName?.replace(/\.$/, "");
 		return status.BackendState === "Running" && dns ? `https://${dns}` : undefined;

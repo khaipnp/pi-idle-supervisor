@@ -57,6 +57,7 @@ interface Shared {
 }
 const SHARED_KEY = Symbol.for("pi-idle-supervisor.remote");
 function shared(): Shared {
+	// SAFETY: only this extension writes SHARED_KEY on globalThis, and always a Shared.
 	const holder = globalThis as { [SHARED_KEY]?: Shared };
 	return (holder[SHARED_KEY] ??= {});
 }
@@ -246,6 +247,7 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 				onClients: refreshFooter,
 			});
 		} catch (error) {
+			// SAFETY: server.start(), the tunnel and resolvePublicUrl reject with Error instances; `code` is optional.
 			const busy = (error as NodeJS.ErrnoException).code === "EADDRINUSE";
 			const why = busy ? `port ${port} is already in use; change remote.port in settings or stop the other process` : (error as Error).message;
 			return c.ui.notify(`Remote could not start on ${host}:${port}: ${why}`, "error");
@@ -271,6 +273,7 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 			}
 		} catch (error) {
 			await stopRemote();
+			// SAFETY: server.start(), the tunnel and resolvePublicUrl reject with Error instances.
 			return c.ui.notify(`Remote not started: ${(error as Error).message}`, "error");
 		}
 		if (state.server !== started) return tunnel?.stop(); // stopped while resolving
@@ -302,11 +305,13 @@ export default function remoteExtension(pi: ExtensionAPI): void {
 		handler: async (args, c) => {
 			ctx = c;
 			const sub = args.trim().split(/\s+/)[0];
+			// SAFETY: `remote` is this extension's own settings key, documented in README.md as RemoteSettings.
 			const settings = (pi.getSettings() as { remote?: RemoteSettings }).remote ?? {};
 			if (!sub) {
 				await state.stopping;
 				if (state.server || !c.hasUI) return showStatus(c);
 				const choice = await c.ui.select("Turn remote on. How will your phone connect?", Object.values(PICKS));
+				// SAFETY: Object.keys of an object literal returns exactly its keys.
 				const mode = (Object.keys(PICKS) as (keyof typeof PICKS)[]).find((key) => PICKS[key] === choice);
 				if (!mode || state.server) return;
 				return startRemote(c, mode, undefined, settings);
